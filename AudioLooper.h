@@ -21,6 +21,7 @@ public:
             tracks[i] = new Track();
         }
         currentTrackIndex = 0;
+        activeTrackCount = 0;
         state = IDLE;
         globalPlayhead = 0;
         timelineLength = 0;
@@ -43,6 +44,47 @@ public:
     void poll() {
         for (int i = 0; i < NUM_LOOPS; i++) {
             if (tracks[i]) tracks[i]->poll();
+        }
+    }
+
+    // New function to handle Potentiometer Muting Logic
+    void updateMuteState(float potVal) {
+        // Only allow muting changes if we are not currently recording or waiting to record
+        // We also don't mute if we have 0 or 1 track (Track 0 is always unmuted)
+        if (state == RECORDING || state == WAITING_TO_RECORD || state == WAITING_TO_FINISH || activeTrackCount <= 1) {
+            return;
+        }
+
+        // Determine the split point (first muted track index) based on Pot Value
+        // Range: 1 to activeTrackCount
+        // (Track 0 is always unmuted, so minimum cutoff is 1)
+        int cutoff = (int)(potVal * activeTrackCount) + 1;
+        if (cutoff > activeTrackCount) cutoff = activeTrackCount;
+
+        // Apply mute state to all active tracks
+        for (int i = 0; i < activeTrackCount; i++) {
+            if (i < cutoff) {
+                tracks[i]->unmute();
+            } else {
+                tracks[i]->mute();
+            }
+        }
+
+        // Update pointer to the cut-off point
+        // If we are appending, this will be activeTrackCount.
+        // If we are branching (muted), this will be the index of the first muted track.
+        currentTrackIndex = cutoff;
+        
+        // Safety clamp for array access (e.g. if activeTrackCount == NUM_LOOPS)
+        if (currentTrackIndex >= NUM_LOOPS) {
+            currentTrackIndex = NUM_LOOPS - 1;
+        }
+
+        // Logic Check: If we are pointing at an existing track (Branching), 
+        // ensure we are in PLAYBACK mode to allow re-recording.
+        // (If we were in FULL_PLAYBACK, we must transition to allow trigger() to record)
+        if (currentTrackIndex < activeTrackCount && state == FULL_PLAYBACK) {
+            state = PLAYBACK;
         }
     }
 
@@ -87,6 +129,11 @@ public:
                     quantizationBlocks = currentTrack->getLengthInBlocks();
                     timelineLength = quantizationBlocks;
                     
+                    // Update Active Count
+                    if (currentTrackIndex >= activeTrackCount) {
+                        activeTrackCount = currentTrackIndex + 1;
+                    }
+                    
                     LOG("AudioLooper: Quantization set to %d blocks", quantizationBlocks);
 
                     if (currentTrackIndex < NUM_LOOPS - 1) {
@@ -107,7 +154,20 @@ public:
                 break;
 
             case PLAYBACK:
-                // Triggered while playing back: Start Recording Next Loop
+                // Triggered while playing back: Start Recording Next Loop (or Overwrite Branch)
+                
+                // BRANCHING LOGIC: If we are recording into a slot that was previously active (or muted branch)
+                if (currentTrackIndex < activeTrackCount) {
+                     LOG("AudioLooper: Branching Detected at %d. Clearing future tracks.", currentTrackIndex);
+                     // Clear this track and all future tracks
+                     for (int i = currentTrackIndex; i < NUM_LOOPS; i++) {
+                         tracks[i]->clear();
+                         tracks[i]->unmute(); // Reset mute state
+                     }
+                     // Reset active count to this index (effectively deleting the branch)
+                     activeTrackCount = currentTrackIndex;
+                }
+
                 // Must be quantized start
                 if (quantizationBlocks > 0 && globalPlayhead % quantizationBlocks == 0) {
                     LOG("AudioLooper: PLAYBACK -> RECORDING (Track %d) [Immediate]", currentTrackIndex);
@@ -125,6 +185,32 @@ public:
                 for(int i=0; i<NUM_LOOPS; i++) {
                     if(tracks[i]) tracks[i]->stop();
                 }
+                // NOTE: We do NOT clear tracks here, just stop.
+                // But per "Reset" logic in original code, it reset everything. 
+                // However, standard looper behavior for a "Stop" button is usually Stop.
+                // But the user mapped FS2 to "Clear/Reset".
+                // FS1 trigger on FULL_PLAYBACK usually means Stop or Undo? 
+                // Original code: "FULL_PLAYBACK -> IDLE (Reset)" and cleared vars but not tracks explicitly in loop, 
+                // but reset currentTrackIndex etc.
+                // Let's keep it as a Stop/Reset of state, but not data clearing. 
+                // Actually, if we go to IDLE, and activeTrackCount > 0, we can probably start playing again?
+                // For now, adhering to previous logic which effectively reset the session state.
+                
+                // Update: If we stop, we probably want to keep the data?
+                // The original code did: currentTrackIndex = 0; state = IDLE; timelineLength = 0; ...
+                // This effectively clears the session "logic" but maybe not the buffers?
+                // Let's assume this is a "Stop All" and we can restart.
+                // But to be safe and simple, let's treat it as a Soft Reset.
+                
+                currentTrackIndex = 0;
+                // We keep activeTrackCount? No, if we reset timelineLength, we break sync.
+                // Let's Reset Completely for now to avoid complexity of "Resume".
+                // Or better: Just Stop.
+                 for(int i=0; i<NUM_LOOPS; i++) {
+                    if(tracks[i]) tracks[i]->clear();
+                }
+                activeTrackCount = 0;
+                
                 currentTrackIndex = 0;
                 timelineLength = 0;
                 globalPlayhead = 0;
@@ -137,9 +223,13 @@ public:
     void reset() {
         LOG("AudioLooper: RESETTING ALL");
         for (int i = 0; i < NUM_LOOPS; i++) {
-            if (tracks[i]) tracks[i]->clear();
+            if (tracks[i]) {
+                tracks[i]->clear();
+                tracks[i]->unmute();
+            }
         }
         currentTrackIndex = 0;
+        activeTrackCount = 0;
         state = IDLE;
         globalPlayhead = 0;
         timelineLength = 0;
@@ -167,6 +257,16 @@ public:
         // 1. Waiting to Record -> Recording
         if (state == WAITING_TO_RECORD) {
             if (quantizationBlocks == 0 || (quantizationBlocks > 0 && globalPlayhead % quantizationBlocks == 0)) {
+                 // BRANCHING LOGIC CHECK (Deferred from Trigger)
+                 if (currentTrackIndex < activeTrackCount) {
+                     LOG("AudioLooper: Branching Executed at %d (Quantized).", currentTrackIndex);
+                     for (int i = currentTrackIndex; i < NUM_LOOPS; i++) {
+                         tracks[i]->clear();
+                         tracks[i]->unmute();
+                     }
+                     activeTrackCount = currentTrackIndex;
+                 }
+                 
                  tracks[currentTrackIndex]->record();
                  state = RECORDING;
             }
@@ -210,12 +310,12 @@ public:
             if (len > 0 && quantizationBlocks > 0 && (len % quantizationBlocks == 0)) {
                 tracks[currentTrackIndex]->play();
                 
-                // Update Global Timeline if this track is the longest
-                // (Though with quantization, it should be a multiple of existing, 
-                // so we just ensure timelineLength accommodates it if we want to loop the whole thing)
-                // For a simple looper, usually the first loop sets the 'master' cycle.
-                // But if we record a longer loop (e.g. 2x), we might want to extend the global cycle?
-                // Let's assume we extend timeline to match longest loop for correct wrapping.
+                // Update Active Count
+                if (currentTrackIndex >= activeTrackCount) {
+                    activeTrackCount = currentTrackIndex + 1;
+                }
+                
+                // Update Global Timeline
                 if (len > timelineLength) {
                     timelineLength = len;
                 }
@@ -249,11 +349,18 @@ public:
     LooperState getState() { return state; }
     uint32_t getPlayhead() { return globalPlayhead; }
     uint32_t getTimelineLength() { return timelineLength; }
+    int getActiveTrackCount() { return activeTrackCount; }
+    int getCurrentTrackIndex() { return currentTrackIndex; }
+    
+    // Returns true if we are pointing at the next empty slot (appending), 
+    // false if we are pointing at an existing track (branching/overwriting).
+    bool isAtEndOfList() { return currentTrackIndex == activeTrackCount; }
 
 private:
     audio_block_t *inputQueueArray[1];
     Track* tracks[NUM_LOOPS];
     int currentTrackIndex;
+    int activeTrackCount;
     
     volatile LooperState state;
     uint32_t globalPlayhead;

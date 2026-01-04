@@ -26,7 +26,7 @@ BAPhysicalControls controls(2, 0, 0, 1);
 Led led1(controls, BA_EXPAND_LED1_PIN);
 Footswitch fs1(controls, BA_EXPAND_SW1_PIN);
 Footswitch fs2(controls, BA_EXPAND_SW2_PIN);
-Pot pot1(controls, BA_EXPAND_POT1_PIN);
+Pot pot1(controls, BA_EXPAND_POT1_PIN, true);
 
 // -------------------------------------------------------------------------
 // Audio System
@@ -103,6 +103,7 @@ void setup() {
         controls.hasSwitchChanged(i, dummy);
         delay(10);
     }
+    pot1.setInitialValue(1.0f);
 
     LOG("Setup Complete!");
 }
@@ -116,6 +117,13 @@ void loop() {
     looper.poll();
 
     // 2. Handle Inputs
+    // Update Potentiometer (Handles Soft Takeover)
+    pot1.update();
+    // if (pot1.changed()) LOG("Pot1 Value: %.2f", pot1.getValue());
+    
+    // Update Looper Mute State based on Pot
+    looper.updateMuteState(pot1.getValue());
+
     handleFootswitch();
     
     // 3. Update Feedback
@@ -127,7 +135,32 @@ void handleFootswitch() {
     fs2.update();
 
     if (fs1.pressed()) {
+        // Check if we are currently in a "Branching" state (overwriting existing tracks)
+        // vs simply appending a new track at the end.
+        // We capture this BEFORE triggering because trigger() might reset the counts.
+        bool isBranching = !looper.isAtEndOfList();
+
+        AudioLooper::LooperState oldState = looper.getState();
+        
         looper.trigger();
+        
+        AudioLooper::LooperState newState = looper.getState();
+        
+        // Detect if we just started a new recording session or track
+        bool startedRecording = (oldState != AudioLooper::RECORDING && oldState != AudioLooper::WAITING_TO_RECORD) &&
+                                (newState == AudioLooper::RECORDING || newState == AudioLooper::WAITING_TO_RECORD);
+
+        if (startedRecording) {
+            // Simplified Logic:
+            // If we are recording over existing tracks (Branching), we MUST have muted them via the pot.
+            // In this case, we always unlock to 1.0 to ensure the new recording is audible.
+            // If we are just appending to the end, we trust the user's current pot setting (unless they mute the new track, 
+            // but the user requested simplicity here).
+            if (isBranching) {
+                pot1.setInitialValue(1.0f);
+                LOG("System: Branching Record Started -> Pot Unlocked to 1.0");
+            }
+        }
     }
     
     if (fs2.pressed()) {
