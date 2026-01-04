@@ -16,26 +16,65 @@ public:
         inputBuffer = new MemoryRam(1, LOOP_BUFFER_SIZE);
     }
 
-    virtual void update(void) {
-        audio_block_t *inBlock = receiveReadOnly(0);
-        audio_block_t *outBlock = allocate();
+    // Call this from the main loop() function as often as possible
+    void poll() {
+        audio_block_t tempBlock;
+        // Drain the RAM buffer into the SD card
+        // This decouples the strict timing of the audio interrupt from the variable timing of SD writes
+        while (inputBuffer->pop(&tempBlock)) {
+            loop1->writeToSd(&tempBlock);
+        }
+    }
 
-        if (!outBlock) {
-            if (inBlock) release(inBlock);
+    void startRecording() {
+        // Clear any old data before starting
+        inputBuffer->reset();
+        
+        // We also likely want to reset loop1's file/playhead here if we are overwriting
+        // For now, we just ensure the file is ready to accept new data
+        // loop1->reset(); // Uncomment if startRecording should always wipe the old loop
+        
+        recording = true;
+    }
+
+    void stopRecording() {
+        recording = false;
+        // We do NOT reset inputBuffer here. 
+        // poll() needs to finish draining the remaining data to the SD card.
+    }
+
+    virtual void update(void) {
+        audio_block_t *inputBlock;
+        audio_block_t *outputBlock;
+
+        outputBlock = allocate();
+        if (!outputBlock) {
+            // If we can't allocate output, we must still consume input to avoid stalling
+            inputBlock = receiveReadOnly(0);
+            if (inputBlock) release(inputBlock);
             return;
         }
 
-        if (inBlock) {
-            memcpy(outBlock->data, inBlock->data, sizeof(outBlock->data));
+        inputBlock = receiveReadOnly(0);
+
+        if (inputBlock) {
+            // Copy dry signal to output
+            memcpy(outputBlock->data, inputBlock->data, sizeof(outputBlock->data));
+            
+            // Handle Recording to Buffer (Producer)
+            if (recording) {
+                // push returns false if buffer is full, effectively dropping the packet
+                inputBuffer->push(inputBlock); 
+            }
+
+            release(inputBlock);
         } else {
-            memset(outBlock->data, 0, sizeof(outBlock->data));
+            // No input, silence the output
+            memset(outputBlock->data, 0, sizeof(outputBlock->data));
         }
 
-        // Add loop audio here...
-
-        transmit(outBlock);
-        release(outBlock);
-        if (inBlock) release(inBlock);
+        transmit(outputBlock, 0);
+        release(outputBlock);
     }
 
 private:
@@ -43,6 +82,8 @@ private:
     MemorySd *loop1;
     MemorySd *loop2;
     MemoryRam *inputBuffer;
+    
+    volatile bool recording = false;
 };
 
 #endif // AUDIO_LOOPER_H
