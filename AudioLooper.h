@@ -20,23 +20,23 @@ public:
     }
 
     void begin() {
-        // Clear SD card state
+        // Clear SD card state on startup for a fresh session
         MemorySd::removeAllFiles();
 
-        // Create Loop 1 on MEM0
+        // Create Loop 1 on MEM0 (Chip Index 0)
         if (!loop1) {
-          loop1 = new MemorySd(0, LOOP_BUFFER_SIZE); 
-          if (loop1) LOG("loop1 Created on MEM0!");
+            loop1 = new MemorySd(0, LOOP_BUFFER_SIZE); 
+            if (loop1) LOG("AudioLooper: Loop1 created on MEM0");
         }
         
-        // Create Loop 2 on MEM1 (Distribute load)
+        // Create Loop 2 on MEM1 (Chip Index 1) - currently unused but initialized
         if (!loop2) {
-          loop2 = new MemorySd(1, LOOP_BUFFER_SIZE);
-          if (loop2) LOG("loop2 Created on MEM1!");
+            loop2 = new MemorySd(1, LOOP_BUFFER_SIZE);
+            if (loop2) LOG("AudioLooper: Loop2 created on MEM1");
         }
     }
 
-    // Call this from the main loop() function as often as possible
+    // Call this from the main loop() function frequentyl to handle SD transfers
     void poll() {
         if (loop1) loop1->update();
         if (loop2) loop2->update();
@@ -45,25 +45,29 @@ public:
     void trigger() {
         switch (state) {
             case IDLE:
+                // Start Recording
                 LOG("AudioLooper: IDLE -> RECORDING");
                 if (loop1) {
-                    loop1->clearLoop();
+                    loop1->clearLoop(); // Reset buffers and files
                 }
                 state = RECORDING;
                 break;
 
             case RECORDING:
+                // Stop Recording, Start Playback
                 LOG("AudioLooper: RECORDING -> PLAYBACK");
-                // Optional: Force read head to 0 to ensure immediate playback of what was just recorded
-                if (loop1) loop1->restartPlayback();
+                if (loop1) {
+                    loop1->finishRecording(); // Finalize the loop length
+                }
+                // Note: We do NOT restartPlayback() here. 
+                // The Output Buffer has been auto-filling during recording (pre-fetch),
+                // so it is primed and ready for instant playback.
                 state = PLAYBACK;
                 break;
 
             case PLAYBACK:
-                LOG("AudioLooper: PLAYBACK -> IDLE (Stop)");
-                // Implementation choice: Go to IDLE or Overdub? 
-                // For now, let's just loop back to IDLE or stay in Playback.
-                // User example had "Staying in PLAYBACK", but let's allow stopping.
+                // Stop Playback
+                LOG("AudioLooper: PLAYBACK -> IDLE");
                 state = IDLE;
                 break;
         }
@@ -79,26 +83,28 @@ public:
             return;
         }
 
-        // 1. Setup Output with Dry Signal
+        // 1. Pass-through Dry Signal
         if (inBlock) {
             memcpy(outBlock->data, inBlock->data, sizeof(outBlock->data));
             
             // 2. Handle Recording
             if (state == RECORDING && loop1) {
+                // Write received audio to Input Buffer (RAM -> SD)
                 loop1->writeSample(inBlock);
             }
         } else {
+            // Generate silence if no input
             memset(outBlock->data, 0, sizeof(outBlock->data));
         }
 
-        // 3. Handle Playback (Mixing)
-        // Note: We can Play AND Record simultaneously if we add an OVERDUB state later.
+        // 3. Handle Playback (Mixing Loop)
         if (state == PLAYBACK && loop1) {
+            // Read from Output Buffer (SD -> RAM)
             if (loop1->readSample(&loopBlock)) {
                 for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
                     int32_t sample = outBlock->data[i] + loopBlock.data[i];
                     
-                    // Hard limiter
+                    // Simple Hard Limiter to prevent wrap-around clipping
                     if (sample > 32767) sample = 32767;
                     if (sample < -32768) sample = -32768;
                     

@@ -5,7 +5,6 @@
 #include <SerialFlash.h>
 #include "BALibrary.h"
 #include "Definitions.h"
-#include "Track.h"
 #include "AudioLooper.h"
 #include "Led.h"
 #include "Footswitch.h"
@@ -18,16 +17,19 @@
 
 using namespace BALibrary;
 
+// -------------------------------------------------------------------------
 // Hardware Controls
+// -------------------------------------------------------------------------
 // 1 Switch (FS1), 0 Pots, 0 Encoders, 1 Output (LED1)
 BAPhysicalControls controls(1, 0, 0, 1);
 
-// Hardware Objects
 Led led1(controls, BA_EXPAND_LED1_PIN);
 Footswitch fs1(controls, BA_EXPAND_SW1_PIN);
 Pot pot1(controls, BA_EXPAND_POT1_PIN);
 
+// -------------------------------------------------------------------------
 // Audio System
+// -------------------------------------------------------------------------
 BAAudioControlWM8731 codecControl;
 AudioInputI2S        i2sIn;
 AudioInputUSB        usbIn;       // USB Audio Input
@@ -36,7 +38,6 @@ AudioOutputI2S       i2sOut;
 AudioOutputUSB       usbOut;      // USB Audio Output
 AudioLooper          looper; 
 
-// Audio Connections
 // 1. Mix Inputs (Hardware + USB Left/Mono)
 AudioConnection      patchMix0(i2sIn, 0, inputMixer, 0);
 AudioConnection      patchMix1(usbIn, 0, inputMixer, 1);
@@ -50,22 +51,34 @@ AudioConnection      patchOut1(looper, 0, i2sOut, 1); // Mono out to both channe
 AudioConnection      patchUsb0(looper, 0, usbOut, 0);
 AudioConnection      patchUsb1(looper, 0, usbOut, 1);
 
+// -------------------------------------------------------------------------
+// Forward Declarations
+// -------------------------------------------------------------------------
 void handleFootswitch();
 void handleLed();
 
+// -------------------------------------------------------------------------
+// Setup
+// -------------------------------------------------------------------------
 void setup() {
     Serial.begin(9600);
     delay(200); // Allow Serial to initialize
 
+    LOG("Starting SuperLooperV2...");
+
     // Initialize BALibrary hardware for TGA Pro MKII Rev 1
     TGA_PRO_MKII_REV1();
+    
+    // Initialize External SPI Memory Chips
     SPI_MEM0_64M();
     SPI_MEM1_64M();
 
-    // Audio Memory
+    // Allocate Audio Memory
+    // 128 blocks is generally sufficient for standard audio path,
+    // but the RingBuffers in MemoryRam manage their own external memory.
     AudioMemory(128);
     
-    // Initialize Looper (Allocate Memory/SD)
+    // Initialize Looper (Allocates Memory/SD structures)
     looper.begin();
 
     // Mixer Gain Settings (Unity)
@@ -83,7 +96,7 @@ void setup() {
     // Set Headphone Volume
     codecControl.setHeadphoneVolume(HEADPHONE_VOLUME);
     
-    // Settle controls
+    // Settle controls to avoid initial spurious reads
     for (unsigned i = 0; i < controls.getNumSwitches(); i++) {
         bool dummy;
         controls.hasSwitchChanged(i, dummy);
@@ -93,8 +106,12 @@ void setup() {
     LOG("Setup Complete!");
 }
 
+// -------------------------------------------------------------------------
+// Main Loop
+// -------------------------------------------------------------------------
 void loop() {
     // 1. Poll Looper (Critical for SD operations)
+    // This moves data between RAM and SD Card
     looper.poll();
 
     // 2. Handle Inputs
