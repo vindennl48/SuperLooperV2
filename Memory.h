@@ -10,403 +10,348 @@
 
 using namespace BALibrary;
 
-// Base class for RAM-only ring buffer operations
+// -------------------------------------------------------------------------
+// MemoryRam
+// A simple Ring Buffer wrapper around the external memory slots.
+// -------------------------------------------------------------------------
 class MemoryRam {
 public:
-    /**
-     * @brief Constructor for the MemoryRam class.
-     * @param memChipIndex The index of the MEM chip to use (0 or 1).
-     * @param sizeInBlocks The size of the allocation in AUDIO_BLOCK_SAMPLES.
-     */
     MemoryRam(int memChipIndex, size_t sizeInBlocks) 
         : m_memChipIndex(memChipIndex), m_sizeInBlocks(sizeInBlocks) 
     {
-        // Allocate the ring buffer on the requested memory chip
         if (!allocateRingBuffer()) {
-            LOG("ERROR: Failed to allocate ring buffer on MEM%d with size %d blocks", m_memChipIndex, m_sizeInBlocks);
+            LOG("ERROR: Failed to allocate ring buffer on MEM%d", m_memChipIndex);
         }
     }
 
     virtual ~MemoryRam() {
-        // No specific cleanup needed for RAM slot as manager handles it / persistent
+        // Persistent memory manager handles cleanup usually, 
+        // but explicit cleanup could go here if the library supported it.
     }
 
-    /**
-     * @brief Adds an audio block to the ring buffer.
-     * @details If the buffer is full, the new data is discarded.
-     * @param block Pointer to the audio block to be added.
-     * @return true if added, false if discarded (full).
-     */
     bool push(audio_block_t* block) {
         return push(block->data);
     }
 
-    /**
-     * @brief Adds raw audio data to the ring buffer.
-     * @param data Pointer to the int16_t array (must be AUDIO_BLOCK_SAMPLES long).
-     * @return true if added, false if discarded (full).
-     */
     bool push(int16_t* data) {
-        if (m_storedBlocks >= m_sizeInBlocks) {
-            return false;
-        }
-
-        // Write data to memory
-        // writeAdvance16 handles the wrapping of the memory slot pointer
+        if (m_storedBlocks >= m_sizeInBlocks) return false;
+        
         bool success = m_memSlot.writeAdvance16(data, AUDIO_BLOCK_SAMPLES);
-
         if (success) {
-            // Increment count safely
             __disable_irq();
             m_storedBlocks++;
             __enable_irq();
-        } else {
-            LOG("ERROR: MemoryRam writeAdvance16 failed (MEM%d)", m_memChipIndex);
         }
-
         return success;
     }
 
-    /**
-     * @brief Pulls an audio block from the ring buffer.
-     * @details Retrieves data in FIFO order.
-     * @param block Pointer to the audio block where data will be written.
-     * @return true if data was retrieved, false if buffer was empty.
-     */
     bool pop(audio_block_t* block) {
-        if (m_storedBlocks == 0) {
-            return false;
-        }
+        if (m_storedBlocks == 0) return false;
 
-        // Read data from memory
-        // readAdvance16 handles the wrapping of the memory slot pointer
         bool success = m_memSlot.readAdvance16(block->data, AUDIO_BLOCK_SAMPLES);
-
         if (success) {
-            // Decrement count safely
             __disable_irq();
             m_storedBlocks--;
             __enable_irq();
-        } else {
-            LOG("ERROR: MemoryRam readAdvance16 failed (MEM%d)", m_memChipIndex);
         }
-
         return success;
     }
 
-    /**
-     * @brief Resets the ring buffer pointers and block count.
-     */
-    virtual void reset() {
+    // New helper to pop data into a raw buffer (for writing to SD)
+    bool popToBuffer(int16_t* buffer) {
+        if (m_storedBlocks == 0) return false;
+        
+        bool success = m_memSlot.readAdvance16(buffer, AUDIO_BLOCK_SAMPLES);
+        if (success) {
+            __disable_irq();
+            m_storedBlocks--;
+            __enable_irq();
+        }
+        return success;
+    }
+
+    void reset() {
         m_memSlot.setWritePosition(0);
         m_memSlot.setReadPosition(0);
-        
         __disable_irq();
         m_storedBlocks = 0;
         __enable_irq();
     }
 
+    size_t getStoredBlocks() const { return m_storedBlocks; }
+    size_t getSpaceBlocks() const { return m_sizeInBlocks - m_storedBlocks; }
+    size_t getSizeInBlocks() const { return m_sizeInBlocks; }
+
 protected:
     int m_memChipIndex;
     size_t m_sizeInBlocks;
     ExtMemSlot m_memSlot;
-    
-    // Volatile to ensure atomic access isn't optimized away
     volatile size_t m_storedBlocks = 0;
 
-    // Helper to get a persistent ExternalSramManager.
     static ExternalSramManager* getSramManager() {
         static ExternalSramManager* manager = new ExternalSramManager();
         return manager;
     }
 
-    /**
-     * @brief allocates a ring buffer of the supplied size onto the configured MEM chip.
-     */
     bool allocateRingBuffer() {
         size_t sizeBytes = m_sizeInBlocks * AUDIO_BLOCK_SAMPLES * sizeof(int16_t);
         MemSelect memSelect = (m_memChipIndex == 0) ? MemSelect::MEM0 : MemSelect::MEM1;
-        
-        // Request memory from the manager. 
         return getSramManager()->requestMemory(&m_memSlot, sizeBytes, memSelect, false);
     }
 };
 
-// Derived class that adds SD card functionality
-class MemorySd : public MemoryRam {
+// -------------------------------------------------------------------------
+// MemorySd
+// Manages a specific Track/Loop.
+// Encapsulates an Input RAM Buffer, an Output RAM Buffer, and an SD File.
+// -------------------------------------------------------------------------
+class MemorySd {
 public:
-    /**
-     * @brief Constructor for the MemorySd class.
-     * @param memChipIndex The index of the MEM chip to use (0 or 1).
-     * @param sizeInBlocks The size of the allocation in AUDIO_BLOCK_SAMPLES.
-     */
-    MemorySd(int memChipIndex, size_t sizeInBlocks) 
-        : MemoryRam(memChipIndex, sizeInBlocks) 
+    MemorySd(int ramChipIndex, size_t bufferSizeBlocks) 
     {
         ensureSdInit();
-        
-        // Programmatically create a unique ID for this instance
         m_uniqueId = getNextId();
         
-        // Create and keep the BIN file open on the SD card
+        // Allocate Input and Output buffers
+        // We put both on the same chip for simplicity, or we could split them if needed.
+        m_inputBuffer = new MemoryRam(ramChipIndex, bufferSizeBlocks);
+        m_outputBuffer = new MemoryRam(ramChipIndex, bufferSizeBlocks);
+        
         createAndOpenFile();
     }
 
+    ~MemorySd() {
+        if (m_inputBuffer) delete m_inputBuffer;
+        if (m_outputBuffer) delete m_outputBuffer;
+        if (m_file) m_file.close();
+    }
+
+    // --- Audio Thread Interface (ISR Safe) ---
+
     /**
-     * @brief Destructor to ensure the file is closed properly.
+     * @brief Writes audio data to the Input Buffer (Recording).
      */
-    ~MemorySd() override {
-        if (m_file) {
-            m_file.close();
-        }
+    void writeSample(audio_block_t* block) {
+        // If buffer is full, we drop samples (overrun)
+        if (m_inputBuffer) m_inputBuffer->push(block);
     }
 
     /**
-     * @brief Resets the RAM buffer and schedules a file reset.
-     *        File deletion/recreation happens in update().
+     * @brief Reads audio data from the Output Buffer (Playback).
+     * @return true if data was available, false if silence/underrun.
      */
-    void clearLoop() {
-        // Reset the RAM buffer first (instant)
-        MemoryRam::reset();
-        
-        m_playhead = 0;
-        m_fileSizeInBlocks = 0;
-        
-        // Schedule heavy SD operations for the next update() call
-        m_shouldClear = true;
+    bool readSample(audio_block_t* block) {
+        if (m_outputBuffer) return m_outputBuffer->pop(block);
+        return false;
     }
 
-    /**
-     * @brief Resets the playhead to the beginning of the SD file.
-     *        This triggers a reset of the RAM buffer.
-     */
-    void resetPlayhead() {
-        m_playhead = 0;
-        
-        // Clear the RAM buffer so we start fresh from the new playhead position
-        MemoryRam::reset();
-    }
+    // --- Main Loop Interface (Maintenance) ---
 
     /**
-     * @brief Appends an audio block to the SD card file.
-     * @param block Pointer to the audio block to be written.
-     */
-    void writeToSd(audio_block_t* block) {
-        if (m_shouldClear) return; // Wait until cleared
-
-        if (!m_file) {
-            LOG("ERROR: writeToSd failed - File not open (ID: %d)", m_uniqueId);
-            return;
-        }
-        
-        // Calculate seek position based on tracked block count to avoid m_file.size() call
-        size_t writePos = m_fileSizeInBlocks * (AUDIO_BLOCK_SAMPLES * sizeof(int16_t));
-
-        // Seek to the end of the file to append
-        if (!m_file.seek(writePos)) {
-            LOG("ERROR: writeToSd failed to seek to pos %d (ID: %d)", writePos, m_uniqueId);
-        }
-        
-        if (m_file.write((uint8_t*)block->data, sizeof(block->data)) == sizeof(block->data)) {
-            m_fileSizeInBlocks++;
-        } else {
-            LOG("ERROR: writeToSd failed to write full block (ID: %d)", m_uniqueId);
-        }
-    }
-
-    /**
-     * @brief Updates the RAM buffer by pulling data from the SD card.
-     *        Should be called regularly (e.g., in loop()).
-     *        Fills the RAM buffer until it is full or SD data runs out.
-     *        Handles looping back to the start of the SD file.
+     * @brief Manages data transfer between RAM buffers and SD Card.
+     *        Must be called frequently in the main loop.
      */
     void update() {
-        // Handle deferred clear
         if (m_shouldClear) {
-            // Close and recreate the file
-            if (m_file) {
-                m_file.close();
-            }
-            
-            if (SD.exists(m_binFileName.c_str())) {
-                SD.remove(m_binFileName.c_str());
-            }
-            
-            m_file = SD.open(m_binFileName.c_str(), FILE_WRITE);
-            if (!m_file) {
-                LOG("ERROR: MemorySd clearLoop failed to recreate file: %s", m_binFileName.c_str());
-            }
-            
-            m_shouldClear = false;
-            return; // Don't try to read immediately after clear
-        }
-
-        if (!m_file || m_fileSizeInBlocks == 0) {
-             return;
-        }
-
-        // Optimization: Read multiple blocks at once to reduce SD overhead
-        const int BATCH_SIZE = 4; // Read up to 4 blocks (1024 bytes) at a time
-        const int MAX_BATCHES = 8; // Max 32 blocks total per frame to prevent UI blocking
-        
-        int batchesProcessed = 0;
-        int16_t tempBuffer[AUDIO_BLOCK_SAMPLES * BATCH_SIZE];
-
-        while (m_storedBlocks < m_sizeInBlocks && batchesProcessed < MAX_BATCHES) {
-            
-            size_t fileSizeInBytes = m_fileSizeInBlocks * (AUDIO_BLOCK_SAMPLES * sizeof(int16_t));
-            
-            // 1. Late Wrap Check: Wrap ONLY if we are at/past the end AND about to read
-            // This ensures we catch data if the file grew since the last frame
-            if (m_playhead >= fileSizeInBytes) {
-                m_playhead = 0;
-            }
-
-            // 2. Calculate Batch Size
-            size_t spaceInRam = m_sizeInBlocks - m_storedBlocks;
-            size_t blocksToRead = (spaceInRam > BATCH_SIZE) ? BATCH_SIZE : spaceInRam;
-            
-            // 3. Clamp to File Size
-            // If we are near the end, only read what's available before the wrap
-            size_t bytesAvailable = fileSizeInBytes - m_playhead;
-            size_t blocksAvailable = bytesAvailable / (AUDIO_BLOCK_SAMPLES * sizeof(int16_t));
-            
-            if (blocksToRead > blocksAvailable) {
-                blocksToRead = blocksAvailable;
-            }
-
-            // If 0 blocks available (e.g., playhead at end), we loop back to top to wrap or break
-            if (blocksToRead == 0) {
-                 // If we are strictly at the end, the next iteration's Late Wrap Check will fix it.
-                 // We break here to allow that to happen on the next pass (or immediately if we loop).
-                 // However, to prevent infinite loop if file size is 0 or something weird:
-                 if (m_playhead >= fileSizeInBytes) continue; // Loop back to wrap
-                 break; // Should not happen if logic is correct
-            }
-
-            // 4. Seek and Read
-            if (!m_file.seek(m_playhead)) {
-                LOG("ERROR: update failed to seek to playhead %d (ID: %d)", m_playhead, m_uniqueId);
-                break;
-            }
-
-            // Read raw bytes into our large temp buffer
-            int bytesToRead = blocksToRead * AUDIO_BLOCK_SAMPLES * sizeof(int16_t);
-            int bytesRead = m_file.read((uint8_t*)tempBuffer, bytesToRead);
-
-            if (bytesRead > 0) {
-                // 5. Push to RAM
-                // We trust the read gave us aligned blocks (SD is reliable like that usually)
-                // Iterate through the temp buffer and push each block
-                int blocksRead = bytesRead / (AUDIO_BLOCK_SAMPLES * sizeof(int16_t));
-                
-                for (int i = 0; i < blocksRead; i++) {
-                    // Calculate pointer offset for this block
-                    int16_t* blockData = &tempBuffer[i * AUDIO_BLOCK_SAMPLES];
-                    if (!push(blockData)) {
-                        LOG("ERROR: MemorySd RAM full during batch push (ID: %d)", m_uniqueId);
-                        break;
-                    }
-                }
-                
-                m_playhead += bytesRead;
-                batchesProcessed++;
-            } else {
-                break;
-            }
-        }
-    }
-
-    /**
-     * @brief Gets the current size of the SD file in audio blocks.
-     * @return The number of audio blocks stored in the file.
-     */
-    size_t getFileSizeInBlocks() const {
-        return m_fileSizeInBlocks;
-    }
-
-    /**
-     * @brief Checks if a file clear/reset is pending.
-     */
-    bool isClearing() const {
-        return m_shouldClear;
-    }
-
-    /**
-     * @brief Static member function to remove all files from the SD card.
-     */
-    static void removeAllFiles() {
-        ensureSdInit();
-        
-        // Ensure we open the root directory
-        File root = SD.open("/");
-        if (!root) {
-            LOG("ERROR: Failed to open SD root");
+            performClear();
             return;
         }
 
+        if (!m_file) return;
+
+        // 1. FLUSH INPUT: Move data from Input RAM -> SD
+        // We check if we have data waiting to be written
+        if (m_inputBuffer && m_inputBuffer->getStoredBlocks() > 0) {
+            flushInputToSd();
+        }
+
+        // 2. REFILL OUTPUT: Move data from SD -> Output RAM
+        // We check if we have space and if there is data left to read
+        // Note: We only read if the file has data (m_fileSizeInBlocks > 0)
+        if (m_outputBuffer && m_fileSizeInBlocks > 0) {
+            // Check if we need to wrap the read cursor (Looping)
+            size_t fileSizeBytes = m_fileSizeInBlocks * AUDIO_BLOCK_SAMPLES * sizeof(int16_t);
+            if (m_readCursor >= fileSizeBytes) {
+                m_readCursor = 0;
+            }
+
+            if (m_outputBuffer->getSpaceBlocks() > 0) {
+                fetchSdToOutput();
+            }
+        }
+    }
+
+    /**
+     * @brief Clears the loop data (RAM and SD) and resets cursors.
+     */
+    void clearLoop() {
+        if (m_inputBuffer) m_inputBuffer->reset();
+        if (m_outputBuffer) m_outputBuffer->reset();
+        
+        m_readCursor = 0;
+        m_writeCursor = 0;
+        m_fileSizeInBlocks = 0;
+        
+        m_shouldClear = true; // Defer file operations to update()
+    }
+    
+    /**
+     * @brief Resets playhead to start (for simple re-triggering).
+     */
+    void restartPlayback() {
+        m_readCursor = 0;
+        if (m_outputBuffer) m_outputBuffer->reset();
+    }
+
+    bool isClearing() const { return m_shouldClear; }
+    size_t getRecordedBlocks() const { return m_fileSizeInBlocks; }
+
+    static void removeAllFiles() {
+        ensureSdInit();
+        File root = SD.open("/");
         while (true) {
             File entry = root.openNextFile();
             if (!entry) break;
-            
             String name = entry.name();
-            // We verify it is not a directory before removing (simple flat file system assumption)
             if (!entry.isDirectory()) {
-                entry.close(); // Important: Close the file handle before removing
-                if (!SD.remove(name.c_str())) {
-                    LOG("ERROR: Failed to remove: %s", name.c_str());
-                }
+                entry.close();
+                SD.remove(name.c_str());
             } else {
                 entry.close();
             }
         }
         root.close();
-
-        LOG("Removed all SD Files!");
+        LOG("Removed all SD Files");
     }
 
 private:
     int m_uniqueId;
     String m_binFileName;
     File m_file;
-    size_t m_playhead = 0; // Current read position in the SD file (bytes)
-    size_t m_fileSizeInBlocks = 0; // Total number of blocks written to the file
-    bool m_shouldClear = false; // Flag to trigger deferred file reset
-
-    // Helper to generate a unique ID for each instance
-    static int getNextId() {
-        static int idCounter = 0;
-        return idCounter++;
-    }
     
-    // Static helper to ensure SD is initialized exactly once
-    static void ensureSdInit() {
-        static bool initialized = false;
-        if (!initialized) {
-            if (!SD.begin(BUILTIN_SDCARD)) {
-                LOG("MemorySd: SD Init Failed!");
-            } else {
-                initialized = true;
-                LOG("MemorySd: SD Init OK.");
+    MemoryRam* m_inputBuffer = nullptr;
+    MemoryRam* m_outputBuffer = nullptr;
+    
+    // File Cursors (in bytes)
+    size_t m_readCursor = 0;
+    size_t m_writeCursor = 0;
+    size_t m_fileSizeInBlocks = 0;
+    
+    bool m_shouldClear = false;
+
+    // Buffering constants
+    static const int BATCH_SIZE = 32; // 8KB buffer for optimal SD writes
+    int16_t m_tempBuffer[AUDIO_BLOCK_SAMPLES * BATCH_SIZE];
+
+    void flushInputToSd() {
+        // Loop until we have processed all stored blocks
+        while (m_inputBuffer->getStoredBlocks() > 0) {
+            // We can write up to BATCH_SIZE blocks at a time
+            size_t available = m_inputBuffer->getStoredBlocks();
+            size_t toWrite = (available > BATCH_SIZE) ? BATCH_SIZE : available;
+            
+            if (toWrite == 0) break;
+
+            // 1. Seek
+            if (!m_file.seek(m_writeCursor)) {
+                LOG("Err: seek write failed");
+                break;
+            }
+
+            // 2. Pop from RAM into Temp Buffer
+            for (size_t i = 0; i < toWrite; i++) {
+                m_inputBuffer->popToBuffer(&m_tempBuffer[i * AUDIO_BLOCK_SAMPLES]);
+            }
+
+            // 3. Write to SD
+            size_t bytesToWrite = toWrite * AUDIO_BLOCK_SAMPLES * sizeof(int16_t);
+            size_t written = m_file.write((uint8_t*)m_tempBuffer, bytesToWrite);
+
+            // 4. Update State
+            m_writeCursor += written;
+            m_fileSizeInBlocks += (written / (AUDIO_BLOCK_SAMPLES * sizeof(int16_t)));
+            
+            // Safety break if write failed or was partial
+            if (written < bytesToWrite) {
+                 LOG("Err: SD Write partial/failed");
+                 break;
             }
         }
     }
 
+    void fetchSdToOutput() {
+        // Loop until output buffer is full or file data runs out
+        while (m_outputBuffer->getSpaceBlocks() > 0) {
+            // Calculate available file data
+            size_t fileSizeBytes = m_fileSizeInBlocks * AUDIO_BLOCK_SAMPLES * sizeof(int16_t);
+            
+            // Handle EOF/Looping logic higher up, but check safety here
+            if (m_readCursor >= fileSizeBytes) break;
+
+            size_t bytesRemaining = fileSizeBytes - m_readCursor;
+            size_t blocksRemaining = bytesRemaining / (AUDIO_BLOCK_SAMPLES * sizeof(int16_t));
+            
+            if (blocksRemaining == 0) break;
+
+            size_t space = m_outputBuffer->getSpaceBlocks();
+            size_t toRead = (space > BATCH_SIZE) ? BATCH_SIZE : space;
+            
+            if (toRead > blocksRemaining) toRead = blocksRemaining;
+            if (toRead == 0) break;
+
+            // 1. Seek
+            if (!m_file.seek(m_readCursor)) {
+                LOG("Err: seek read failed");
+                break;
+            }
+
+            // 2. Read from SD
+            size_t bytesToRead = toRead * AUDIO_BLOCK_SAMPLES * sizeof(int16_t);
+            size_t read = m_file.read((uint8_t*)m_tempBuffer, bytesToRead);
+
+            if (read > 0) {
+                // 3. Push to Output RAM
+                size_t blocksRead = read / (AUDIO_BLOCK_SAMPLES * sizeof(int16_t));
+                for (size_t i = 0; i < blocksRead; i++) {
+                    m_outputBuffer->push(&m_tempBuffer[i * AUDIO_BLOCK_SAMPLES]);
+                }
+                m_readCursor += read;
+            } else {
+                break;
+            }
+        }
+    }
+
+    void performClear() {
+        if (m_file) m_file.close();
+        if (SD.exists(m_binFileName.c_str())) SD.remove(m_binFileName.c_str());
+        
+        m_file = SD.open(m_binFileName.c_str(), FILE_WRITE);
+        if (!m_file) LOG("Err: Failed recreate file");
+        
+        m_shouldClear = false;
+        m_fileSizeInBlocks = 0;
+        m_readCursor = 0;
+        m_writeCursor = 0;
+    }
+
     void createAndOpenFile() {
         m_binFileName = "track_" + String(m_uniqueId) + ".bin";
-        m_fileSizeInBlocks = 0;
-        
-        // Remove if it already exists to ensure a fresh file
-        if (SD.exists(m_binFileName.c_str())) {
-            SD.remove(m_binFileName.c_str());
-        }
-        
-        // Create the file and keep it open for read/write
-        // FILE_WRITE opens for reading and writing, starting at the end of the file.
+        if (SD.exists(m_binFileName.c_str())) SD.remove(m_binFileName.c_str());
         m_file = SD.open(m_binFileName.c_str(), FILE_WRITE);
-        
-        if (!m_file) {
-            LOG("ERROR: MemorySd failed to create file: %s", m_binFileName.c_str());
+    }
+
+    static int getNextId() {
+        static int id = 0;
+        return id++;
+    }
+
+    static void ensureSdInit() {
+        static bool init = false;
+        if (!init) {
+            init = SD.begin(BUILTIN_SDCARD);
+            if (init) LOG("SD Init OK");
+            else LOG("SD Init FAIL");
         }
     }
 };

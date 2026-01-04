@@ -16,7 +16,6 @@ public:
     AudioLooper(void) : AudioStream(1, inputQueueArray) {
         loop1 = nullptr;
         loop2 = nullptr;
-        inputBuffer = nullptr;
         state = IDLE;
     }
 
@@ -24,59 +23,48 @@ public:
         // Clear SD card state
         MemorySd::removeAllFiles();
 
-        // Create 2x loops allocating to MEM0
+        // Create Loop 1 on MEM0
         if (!loop1) {
-          loop1 = new MemorySd(0, LOOP_BUFFER_SIZE);
-          if (loop1) LOG("loop1 Created!");
+          loop1 = new MemorySd(0, LOOP_BUFFER_SIZE); 
+          if (loop1) LOG("loop1 Created on MEM0!");
         }
+        
+        // Create Loop 2 on MEM1 (Distribute load)
         if (!loop2) {
-          loop2 = new MemorySd(0, LOOP_BUFFER_SIZE);
-          if (loop2) LOG("loop2 Created!");
-        }
-
-        // Create 1 input buffer allocating to MEM1
-        if (!inputBuffer) {
-          inputBuffer = new MemoryRam(1, LOOP_BUFFER_SIZE);
-          if (inputBuffer) LOG("inputBuffer Created!");
+          loop2 = new MemorySd(1, LOOP_BUFFER_SIZE);
+          if (loop2) LOG("loop2 Created on MEM1!");
         }
     }
 
     // Call this from the main loop() function as often as possible
     void poll() {
-        if (!loop1 || !inputBuffer) return; // Safety check
-
-        // loops should ALWAYS update (handles deferred file operations)
-        loop1->update();
-
-        // 1. Drain the Input Buffer (Recording to SD)
-        // Only drain if the target file is ready (not waiting to be cleared)
-        if (!loop1->isClearing()) {
-            audio_block_t tempBlock;
-            while (inputBuffer->pop(&tempBlock)) {
-                loop1->writeToSd(&tempBlock);
-            }
-        }
+        if (loop1) loop1->update();
+        if (loop2) loop2->update();
     }
 
     void trigger() {
         switch (state) {
             case IDLE:
-                LOG("AudioLooper: State IDLE -> RECORDING");
-                // IDLE -> RECORDING
-                inputBuffer->reset();
-                loop1->clearLoop(); // Clear old loop data
+                LOG("AudioLooper: IDLE -> RECORDING");
+                if (loop1) {
+                    loop1->clearLoop();
+                }
                 state = RECORDING;
                 break;
 
             case RECORDING:
-                LOG("AudioLooper: State RECORDING -> PLAYBACK");
-                // RECORDING -> PLAYBACK
+                LOG("AudioLooper: RECORDING -> PLAYBACK");
+                // Optional: Force read head to 0 to ensure immediate playback of what was just recorded
+                if (loop1) loop1->restartPlayback();
                 state = PLAYBACK;
                 break;
 
             case PLAYBACK:
-                // Stay in PLAYBACK indefinitely for testing
-                LOG("AudioLooper: Trigger ignored (Staying in PLAYBACK)");
+                LOG("AudioLooper: PLAYBACK -> IDLE (Stop)");
+                // Implementation choice: Go to IDLE or Overdub? 
+                // For now, let's just loop back to IDLE or stay in Playback.
+                // User example had "Staying in PLAYBACK", but let's allow stopping.
+                state = IDLE;
                 break;
         }
     }
@@ -91,28 +79,31 @@ public:
             return;
         }
 
-        // 1. Setup Output with Dry Signal & Record
+        // 1. Setup Output with Dry Signal
         if (inBlock) {
             memcpy(outBlock->data, inBlock->data, sizeof(outBlock->data));
             
-            if (state == RECORDING) {
-                // push returns false if buffer is full
-                inputBuffer->push(inBlock->data); 
+            // 2. Handle Recording
+            if (state == RECORDING && loop1) {
+                loop1->writeSample(inBlock);
             }
         } else {
             memset(outBlock->data, 0, sizeof(outBlock->data));
         }
 
-        // 2. Mix Loop 1 (Only in PLAYBACK)
-        if (state == PLAYBACK && loop1->pop(&loopBlock)) {
-            for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
-                int32_t sample = outBlock->data[i] + loopBlock.data[i];
-                
-                // Hard limiter
-                if (sample > 32767) sample = 32767;
-                if (sample < -32768) sample = -32768;
-                
-                outBlock->data[i] = (int16_t)sample;
+        // 3. Handle Playback (Mixing)
+        // Note: We can Play AND Record simultaneously if we add an OVERDUB state later.
+        if (state == PLAYBACK && loop1) {
+            if (loop1->readSample(&loopBlock)) {
+                for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
+                    int32_t sample = outBlock->data[i] + loopBlock.data[i];
+                    
+                    // Hard limiter
+                    if (sample > 32767) sample = 32767;
+                    if (sample < -32768) sample = -32768;
+                    
+                    outBlock->data[i] = (int16_t)sample;
+                }
             }
         }
 
@@ -121,14 +112,12 @@ public:
         if (inBlock) release(inBlock);
     }
     
-    // Getter for UI feedback
     LooperState getState() { return state; }
 
 private:
     audio_block_t *inputQueueArray[1];
     MemorySd *loop1;
     MemorySd *loop2;
-    MemoryRam *inputBuffer;
     
     volatile LooperState state;
 };
