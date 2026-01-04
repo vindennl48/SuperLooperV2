@@ -29,12 +29,13 @@ public:
         // loops should ALWAYS update (handles deferred file operations)
         loop1->update();
 
-        audio_block_t tempBlock;
-        
         // 1. Drain the Input Buffer (Recording to SD)
-        // We always check this, effectively background flushing whatever is left
-        while (inputBuffer->pop(&tempBlock)) {
-            loop1->writeToSd(&tempBlock);
+        // Only drain if the target file is ready (not waiting to be cleared)
+        if (!loop1->isClearing()) {
+            audio_block_t tempBlock;
+            while (inputBuffer->pop(&tempBlock)) {
+                loop1->writeToSd(&tempBlock);
+            }
         }
     }
 
@@ -78,7 +79,7 @@ public:
             
             if (state == RECORDING) {
                 // push returns false if buffer is full
-                inputBuffer->push(inBlock); 
+                inputBuffer->push(inBlock->data); 
             }
         } else {
             memset(outBlock->data, 0, sizeof(outBlock->data));

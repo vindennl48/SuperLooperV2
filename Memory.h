@@ -38,13 +38,22 @@ public:
      * @return true if added, false if discarded (full).
      */
     bool push(audio_block_t* block) {
+        return push(block->data);
+    }
+
+    /**
+     * @brief Adds raw audio data to the ring buffer.
+     * @param data Pointer to the int16_t array (must be AUDIO_BLOCK_SAMPLES long).
+     * @return true if added, false if discarded (full).
+     */
+    bool push(int16_t* data) {
         if (m_storedBlocks >= m_sizeInBlocks) {
             return false;
         }
 
         // Write data to memory
         // writeAdvance16 handles the wrapping of the memory slot pointer
-        bool success = m_memSlot.writeAdvance16(block->data, AUDIO_BLOCK_SAMPLES);
+        bool success = m_memSlot.writeAdvance16(data, AUDIO_BLOCK_SAMPLES);
 
         if (success) {
             // Increment count safely
@@ -232,46 +241,77 @@ public:
             return; // Don't try to read immediately after clear
         }
 
-        if (!m_file) {
+        if (!m_file || m_fileSizeInBlocks == 0) {
              return;
         }
+
+        // Optimization: Read multiple blocks at once to reduce SD overhead
+        const int BATCH_SIZE = 4; // Read up to 4 blocks (1024 bytes) at a time
+        const int MAX_BATCHES = 8; // Max 32 blocks total per frame to prevent UI blocking
         
-        if (m_fileSizeInBlocks == 0) return;
+        int batchesProcessed = 0;
+        int16_t tempBuffer[AUDIO_BLOCK_SAMPLES * BATCH_SIZE];
 
-        // Calculate file size in bytes from blocks
-        size_t fileSize = m_fileSizeInBlocks * (AUDIO_BLOCK_SAMPLES * sizeof(int16_t));
-
-        // Keep filling until RAM is full
-        while (m_storedBlocks < m_sizeInBlocks) {
-            // Handle Looping
-            if (m_playhead >= fileSize) {
+        while (m_storedBlocks < m_sizeInBlocks && batchesProcessed < MAX_BATCHES) {
+            
+            size_t fileSizeInBytes = m_fileSizeInBlocks * (AUDIO_BLOCK_SAMPLES * sizeof(int16_t));
+            
+            // 1. Late Wrap Check: Wrap ONLY if we are at/past the end AND about to read
+            // This ensures we catch data if the file grew since the last frame
+            if (m_playhead >= fileSizeInBytes) {
                 m_playhead = 0;
             }
 
-            // Create a temporary block to read into
-            audio_block_t tempBlock; 
+            // 2. Calculate Batch Size
+            size_t spaceInRam = m_sizeInBlocks - m_storedBlocks;
+            size_t blocksToRead = (spaceInRam > BATCH_SIZE) ? BATCH_SIZE : spaceInRam;
+            
+            // 3. Clamp to File Size
+            // If we are near the end, only read what's available before the wrap
+            size_t bytesAvailable = fileSizeInBytes - m_playhead;
+            size_t blocksAvailable = bytesAvailable / (AUDIO_BLOCK_SAMPLES * sizeof(int16_t));
+            
+            if (blocksToRead > blocksAvailable) {
+                blocksToRead = blocksAvailable;
+            }
 
-            // Seek and Read
+            // If 0 blocks available (e.g., playhead at end), we loop back to top to wrap or break
+            if (blocksToRead == 0) {
+                 // If we are strictly at the end, the next iteration's Late Wrap Check will fix it.
+                 // We break here to allow that to happen on the next pass (or immediately if we loop).
+                 // However, to prevent infinite loop if file size is 0 or something weird:
+                 if (m_playhead >= fileSizeInBytes) continue; // Loop back to wrap
+                 break; // Should not happen if logic is correct
+            }
+
+            // 4. Seek and Read
             if (!m_file.seek(m_playhead)) {
                 LOG("ERROR: update failed to seek to playhead %d (ID: %d)", m_playhead, m_uniqueId);
                 break;
             }
-            
-            int bytesRead = m_file.read((uint8_t*)tempBlock.data, sizeof(tempBlock.data));
+
+            // Read raw bytes into our large temp buffer
+            int bytesToRead = blocksToRead * AUDIO_BLOCK_SAMPLES * sizeof(int16_t);
+            int bytesRead = m_file.read((uint8_t*)tempBuffer, bytesToRead);
 
             if (bytesRead > 0) {
-                // Attempt to push to RAM
-                if (push(&tempBlock)) {
-                    m_playhead += bytesRead;
-                } else {
-                    // RAM became full
-                    break;
+                // 5. Push to RAM
+                // We trust the read gave us aligned blocks (SD is reliable like that usually)
+                // Iterate through the temp buffer and push each block
+                int blocksRead = bytesRead / (AUDIO_BLOCK_SAMPLES * sizeof(int16_t));
+                
+                for (int i = 0; i < blocksRead; i++) {
+                    // Calculate pointer offset for this block
+                    int16_t* blockData = &tempBuffer[i * AUDIO_BLOCK_SAMPLES];
+                    if (!push(blockData)) {
+                        LOG("ERROR: MemorySd RAM full during batch push (ID: %d)", m_uniqueId);
+                        break;
+                    }
                 }
+                
+                m_playhead += bytesRead;
+                batchesProcessed++;
             } else {
-                // Could not read data (EOF or Error)
-                if (m_playhead < fileSize) {
-                     LOG("ERROR: update read 0 bytes but not at EOF (ID: %d)", m_uniqueId);
-                }
                 break;
             }
         }
@@ -283,6 +323,13 @@ public:
      */
     size_t getFileSizeInBlocks() const {
         return m_fileSizeInBlocks;
+    }
+
+    /**
+     * @brief Checks if a file clear/reset is pending.
+     */
+    bool isClearing() const {
+        return m_shouldClear;
     }
 
     /**

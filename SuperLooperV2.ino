@@ -16,9 +16,6 @@ using namespace BALibrary;
 // 1 Switch (FS1), 0 Pots, 0 Encoders, 1 Output (LED1)
 BAPhysicalControls controls(1, 0, 0, 1);
 
-// Handles for controls
-// (Pot handle replaced by object below)
-
 // Hardware Objects
 Led led1(controls, BA_EXPAND_LED1_PIN);
 Footswitch fs1(controls, BA_EXPAND_SW1_PIN);
@@ -28,14 +25,16 @@ Pot pot1(controls, BA_EXPAND_POT1_PIN);
 BAAudioControlWM8731 codecControl;
 AudioInputI2S        i2sIn;
 AudioOutputI2S       i2sOut;
-AudioLooper          looper; // Looper Instance (Not connected yet)
+AudioLooper          looper; 
 
-// Audio Connections (Bypass for now)
-AudioConnection      patch0(i2sIn, 0, i2sOut, 0);
-AudioConnection      patch1(i2sIn, 0, i2sOut, 1);
+// Audio Connections
+// Route Input -> Looper -> Output
+AudioConnection      patch0(i2sIn, 0, looper, 0);
+AudioConnection      patch1(looper, 0, i2sOut, 0);
+AudioConnection      patch2(looper, 0, i2sOut, 1); // Mono out to both channels
 
 void handleFootswitch();
-void handlePots();
+void handleLed();
 
 void setup() {
     // Initialize BALibrary hardware for TGA Pro MKII Rev 1
@@ -59,48 +58,44 @@ void setup() {
         delay(10);
     }
 
-    // Turn on LED 1 to indicate setup complete
+    // Indicate ready
     led1.on();
+    delay(500);
+    led1.off();
 }
 
 void loop() {
+    // 1. Poll Looper (Critical for SD operations)
+    looper.poll();
+
+    // 2. Handle Inputs
     handleFootswitch();
-    handlePots();
-    led1.update();
+    
+    // 3. Update Feedback
+    handleLed();
 }
 
 void handleFootswitch() {
     fs1.update();
 
     if (fs1.pressed()) {
-        // Short press action (start record/play) will go here
-        led1.toggle(); // Toggle LED on press for feedback
-    }
-
-    if (fs1.longPressed()) {
-        // Long press action (stop/clear) will go here
-        // Blink LED to indicate long press: 1 second duration, 100ms interval, end state OFF
-        led1.blinkForDuration(1000, 100, Led::OFF);
+        looper.trigger();
     }
 }
 
-void handlePots() {
-    // Update pot reading
-    if (pot1.update()) {
-        float val = pot1.getValue();
+void handleLed() {
+    led1.update();
 
-        // Control LED blink rate based on pot position
-        // 0.0 -> OFF
-        // 1.0 -> 50ms interval (Fast blink)
-        
-        if (val < 0.02f) {
+    // Simple state feedback
+    switch (looper.getState()) {
+        case AudioLooper::IDLE:
             led1.off();
-        } else {
-            // Map 0.02 - 1.0 to 1000ms - 50ms
-            // Formula: Out = InMax - (NormVal * Range)
-            // We want high val -> low interval
-            unsigned long interval = (unsigned long)(1000.0f - ((val - 0.02f) / 0.98f * 950.0f));
-            led1.blink(interval);
-        }
+            break;
+        case AudioLooper::RECORDING:
+            led1.on(); // Solid ON for recording
+            break;
+        case AudioLooper::PLAYBACK:
+            led1.blink(500); // Slow blink for playback
+            break;
     }
 }
