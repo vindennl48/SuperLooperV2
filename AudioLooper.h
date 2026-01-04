@@ -43,38 +43,31 @@ public:
         // poll() needs to finish draining the remaining data to the SD card.
     }
 
-    virtual void update(void) {
-        audio_block_t *inputBlock;
-        audio_block_t *outputBlock;
 
-        outputBlock = allocate();
-        if (!outputBlock) {
-            // If we can't allocate output, we must still consume input to avoid stalling
-            inputBlock = receiveReadOnly(0);
-            if (inputBlock) release(inputBlock);
+    virtual void update(void) {
+        audio_block_t *inBlock = receiveReadOnly(0);
+        audio_block_t *outBlock = allocate();
+
+        if (!outBlock) {
+            if (inBlock) release(inBlock);
             return;
         }
 
-        inputBlock = receiveReadOnly(0);
-
-        if (inputBlock) {
-            // Copy dry signal to output
-            memcpy(outputBlock->data, inputBlock->data, sizeof(outputBlock->data));
-            
-            // Handle Recording to Buffer (Producer)
-            if (recording) {
-                // push returns false if buffer is full, effectively dropping the packet
-                inputBuffer->push(inputBlock); 
-            }
-
-            release(inputBlock);
+        if (inBlock) {
+            memcpy(outBlock->data, inBlock->data, sizeof(outBlock->data));
         } else {
-            // No input, silence the output
-            memset(outputBlock->data, 0, sizeof(outputBlock->data));
+            memset(outBlock->data, 0, sizeof(outBlock->data));
         }
 
-        transmit(outputBlock, 0);
-        release(outputBlock);
+        // Handle Recording to Buffer (Producer)
+        if (recording) {
+            // push returns false if buffer is full, effectively dropping the packet
+            inputBuffer->push(inputBlock); 
+        }
+
+        transmit(outBlock);
+        release(outBlock);
+        if (inBlock) release(inBlock);
     }
 
 private:
