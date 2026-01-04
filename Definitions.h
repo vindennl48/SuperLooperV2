@@ -4,7 +4,7 @@
 #define DEBUG_MODE 1
 
 #if DEBUG_MODE
-    #define LOG(...) Serial.printf(__VA_ARGS__); Serial.println()
+    #define LOG(...) do { Serial.printf(__VA_ARGS__); Serial.println(); } while (0)
 #else
     #define LOG(...)
 #endif
@@ -18,5 +18,7 @@
 #define SAMPLE_RATE 44100
 #define TOTAL_SRAM_SAMPLES 8388608
 #define LOOP_BUFFER_SIZE 2048
+
+#define HEADPHONE_VOLUME 0.8f
 
 #endif // DEFINITIONS_H

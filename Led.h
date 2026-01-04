@@ -3,6 +3,7 @@
 
 #include <Arduino.h>
 #include "BALibrary.h"
+#include "Definitions.h"
 
 // Class to manage LED state including non-blocking blinking
 class Led {
@@ -23,8 +24,9 @@ public:
     // It registers itself with controls and stores the handle privately
     Led(BALibrary::BAPhysicalControls& controls, uint8_t pin)
         : m_controls(controls), m_state(OFF), 
-          m_blinkState(false), m_blinkInterval(500), m_lastUpdate(0),
-          m_blinkMode(BLINK_INFINITE), m_blinkStartTime(0), m_blinkDuration(0),
+          m_blinkMode(BLINK_INFINITE), m_blinkState(false),
+          m_blinkInterval(500), m_lastUpdate(0),
+          m_blinkStartTime(0), m_blinkDuration(0),
           m_blinkCount(0), m_returnState(OFF)
     {
         m_handle = m_controls.addOutput(pin);
@@ -32,12 +34,14 @@ public:
 
     // Turn LED solid ON
     void on() {
+        if (m_state != ON) LOG("LED ON");
         m_state = ON;
         m_controls.setOutput(m_handle, 1);
     }
 
     // Turn LED solid OFF
     void off() {
+        if (m_state != OFF) LOG("LED OFF");
         m_state = OFF;
         m_controls.setOutput(m_handle, 0);
     }
@@ -59,6 +63,10 @@ public:
 
     // Start blinking indefinitely with symmetrical on/off duration
     void blink(unsigned long intervalMs) {
+        // If already blinking indefinitely at the same interval, do nothing
+        if (m_state == BLINKING && m_blinkMode == BLINK_INFINITE && m_blinkInterval == intervalMs) {
+            return;
+        }
         setupBlink(intervalMs);
         m_blinkMode = BLINK_INFINITE;
     }
@@ -125,6 +133,7 @@ public:
 private:
     // Helper to initialize blink parameters and reset timer
     void setupBlink(unsigned long intervalMs) {
+        LOG("LED BLINK START (Interval: %lu ms)", intervalMs);
         m_state = BLINKING;
         m_blinkInterval = intervalMs;
         m_blinkState = true; // Always start in ON phase

@@ -3,6 +3,7 @@
 
 #include <Arduino.h>
 #include "BALibrary.h"
+#include "Definitions.h"
 
 // Class to manage Footswitch state including press, hold, and long-press detection
 class Footswitch {
@@ -37,14 +38,17 @@ public:
                 m_isHeld = true;
                 m_pressStartTime = millis();
                 m_longPressTriggered = false; // Reset logic for a new press
+                LOG("Footswitch Pressed");
             } else {
                 // Button Released (Falling Edge)
                 m_justReleased = true;
                 m_isHeld = false;
+                LOG("Footswitch Released");
                 
                 // If we were in a long press state, trigger the specific release event
                 if (m_longPressTriggered) {
                     m_justLongPressReleased = true;
+                    LOG("Footswitch Long Press Released");
                 }
             }
         }
@@ -54,6 +58,7 @@ public:
             if (millis() - m_pressStartTime >= m_longPressMs) {
                 m_justLongPressed = true;
                 m_longPressTriggered = true; // Mark that long press has occurred
+                LOG("Footswitch Long Pressed");
             }
         }
     }

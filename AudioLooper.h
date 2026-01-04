@@ -14,18 +14,28 @@ public:
     };
 
     AudioLooper(void) : AudioStream(1, inputQueueArray) {
+        loop1 = nullptr;
+        loop2 = nullptr;
+        inputBuffer = nullptr;
+        state = IDLE;
+    }
+
+    void begin() {
+        // Clear SD card state
+        MemorySd::removeAllFiles();
+
         // Create 2x loops allocating to MEM0
-        loop1 = new MemorySd(0, LOOP_BUFFER_SIZE);
-        loop2 = new MemorySd(0, LOOP_BUFFER_SIZE);
+        if (!loop1) loop1 = new MemorySd(0, LOOP_BUFFER_SIZE);
+        if (!loop2) loop2 = new MemorySd(0, LOOP_BUFFER_SIZE);
 
         // Create 1 input buffer allocating to MEM1
-        inputBuffer = new MemoryRam(1, LOOP_BUFFER_SIZE);
-        
-        state = IDLE;
+        if (!inputBuffer) inputBuffer = new MemoryRam(1, LOOP_BUFFER_SIZE);
     }
 
     // Call this from the main loop() function as often as possible
     void poll() {
+        if (!loop1 || !inputBuffer) return; // Safety check
+
         // loops should ALWAYS update (handles deferred file operations)
         loop1->update();
 
