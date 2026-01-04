@@ -19,6 +19,7 @@ public:
         gain = 1.0f;
         muted = false;
         paused = false;
+        blockCounter = 0;
     }
 
     void begin() {
@@ -49,6 +50,7 @@ public:
         if (state == RECORDING) {
             if (input) {
                 memory->writeSample(input);
+                blockCounter++;
             }
         }
         
@@ -88,6 +90,7 @@ public:
     void record() {
         if (state == IDLE) {
             memory->clearLoop();
+            blockCounter = 0;
             state = RECORDING;
             paused = false;
         }
@@ -97,8 +100,8 @@ public:
         if (state == RECORDING) {
             memory->finishRecording();
             state = PLAYBACK;
-        } else if (state == IDLE && memory->getRecordedBlocks() > 0) {
-            memory->restartPlayback();
+        } else if (state == IDLE && getLengthInBlocks() > 0) {
+            if (memory) memory->restartPlayback();
             state = PLAYBACK;
         }
         paused = false;
@@ -127,6 +130,7 @@ public:
         memory->clearLoop();
         state = IDLE;
         paused = false;
+        blockCounter = 0;
     }
 
     // --- Getters ---
@@ -135,7 +139,7 @@ public:
     bool isRecording() const { return state == RECORDING; }
     bool isPaused() const { return paused; }
     bool isMuted() const { return muted; }
-    size_t getLengthInBlocks() const { return memory ? memory->getRecordedBlocks() : 0; }
+    size_t getLengthInBlocks() const { return blockCounter; }
     TrackState getState() const { return state; }
 
 private:
@@ -144,6 +148,7 @@ private:
     float gain;
     bool muted;
     bool paused;
+    volatile uint32_t blockCounter;
 };
 
 #endif // TRACK_H

@@ -9,7 +9,9 @@ class AudioLooper : public AudioStream {
 public:
     enum LooperState {
         IDLE,
+        WAITING_TO_RECORD,
         RECORDING,
+        WAITING_TO_FINISH,
         PLAYBACK,
         FULL_PLAYBACK
     };
@@ -22,6 +24,7 @@ public:
         state = IDLE;
         globalPlayhead = 0;
         timelineLength = 0;
+        quantizationBlocks = 0;
     }
 
     void begin() {
@@ -49,45 +52,71 @@ public:
 
         switch (state) {
             case IDLE:
-                // Start Recording First Loop
-                LOG("AudioLooper: IDLE -> RECORDING (Track %d)", currentTrackIndex);
-                currentTrack->record();
-                
-                // Reset Global Time only on fresh start
-                timelineLength = 0;
-                globalPlayhead = 0;
-                
-                state = RECORDING;
+                // Start Recording
+                // If this is the very first loop (timelineLength == 0) OR we are at 0, start immediately
+                // However, requirement says "only ever start ... if globalPlayhead is at 0".
+                // If timelineLength is 0, globalPlayhead is 0.
+                if (globalPlayhead == 0) {
+                    LOG("AudioLooper: IDLE -> RECORDING (Track %d) [Immediate]", currentTrackIndex);
+                    currentTrack->record();
+                    state = RECORDING;
+                    
+                    // If this is the absolute first start, ensure timeline is reset (redundant but safe)
+                    if (timelineLength == 0) {
+                        // First loop defines the timeline
+                    }
+                } else {
+                    LOG("AudioLooper: IDLE -> WAITING_TO_RECORD (Track %d)", currentTrackIndex);
+                    state = WAITING_TO_RECORD;
+                }
+                break;
+
+            case WAITING_TO_RECORD:
+                // Optional: Allow cancelling? For now, do nothing or maybe force start?
+                // Let's stick to strict quantization logic.
                 break;
 
             case RECORDING:
-                // Stop Recording Current Loop, Start Playback
-                LOG("AudioLooper: RECORDING -> PLAYBACK (Track %d)", currentTrackIndex);
-                currentTrack->play();
-                
-                // Update Global Timeline if this track is the longest so far
-                if (currentTrack->getLengthInBlocks() > timelineLength) {
-                    timelineLength = currentTrack->getLengthInBlocks();
-                    LOG("AudioLooper: Timeline updated to %d blocks", timelineLength);
-                }
-                
-                // Check if we have more loops to record
-                if (currentTrackIndex < NUM_LOOPS - 1) {
-                    currentTrackIndex++;
-                    state = PLAYBACK; // Ready for next trigger to record
+                // Stop Recording
+                if (quantizationBlocks == 0) {
+                    // First Loop Logic: Finish Immediately
+                    LOG("AudioLooper: RECORDING -> PLAYBACK (Track %d) [First Loop Set]", currentTrackIndex);
+                    currentTrack->play();
+                    
+                    // Set Quantization and Timeline
+                    quantizationBlocks = currentTrack->getLengthInBlocks();
+                    timelineLength = quantizationBlocks;
+                    
+                    LOG("AudioLooper: Quantization set to %d blocks", quantizationBlocks);
+
+                    if (currentTrackIndex < NUM_LOOPS - 1) {
+                        currentTrackIndex++;
+                        state = PLAYBACK;
+                    } else {
+                        state = FULL_PLAYBACK;
+                    }
                 } else {
-                    state = FULL_PLAYBACK; // All loops recorded
-                    LOG("AudioLooper: All Tracks Recorded -> FULL_PLAYBACK");
+                    // Subsequent Loops: Wait for Quantization
+                    LOG("AudioLooper: RECORDING -> WAITING_TO_FINISH (Track %d)", currentTrackIndex);
+                    state = WAITING_TO_FINISH;
                 }
-                
-                // NOTE: We do NOT reset globalPlayhead here to keep time continuity.
+                break;
+            
+            case WAITING_TO_FINISH:
+                // Already waiting. Do nothing.
                 break;
 
             case PLAYBACK:
-                // Triggered while playing back (and not full): Start Recording Next Loop
-                LOG("AudioLooper: PLAYBACK -> RECORDING (Track %d)", currentTrackIndex);
-                tracks[currentTrackIndex]->record();
-                state = RECORDING;
+                // Triggered while playing back: Start Recording Next Loop
+                // Must be quantized start
+                if (globalPlayhead == 0) {
+                    LOG("AudioLooper: PLAYBACK -> RECORDING (Track %d) [Immediate]", currentTrackIndex);
+                    tracks[currentTrackIndex]->record();
+                    state = RECORDING;
+                } else {
+                    LOG("AudioLooper: PLAYBACK -> WAITING_TO_RECORD (Track %d)", currentTrackIndex);
+                    state = WAITING_TO_RECORD;
+                }
                 break;
                 
             case FULL_PLAYBACK:
@@ -97,6 +126,9 @@ public:
                     if(tracks[i]) tracks[i]->stop();
                 }
                 currentTrackIndex = 0;
+                timelineLength = 0;
+                globalPlayhead = 0;
+                quantizationBlocks = 0;
                 state = IDLE;
                 break;
         }
@@ -118,6 +150,16 @@ public:
             memset(outBlock->data, 0, sizeof(outBlock->data));
         }
 
+        // --- Handle State Transitions (Quantized) ---
+        
+        // 1. Waiting to Record -> Recording
+        if (state == WAITING_TO_RECORD) {
+            if (globalPlayhead == 0) {
+                 tracks[currentTrackIndex]->record();
+                 state = RECORDING;
+            }
+        }
+
         // --- Process Tracks ---
         
         // Temporary buffer for mixing
@@ -128,6 +170,8 @@ public:
             if (!t) continue;
 
             // Render track
+            // NOTE: If we are WAITING_TO_FINISH, we are technically still in RECORDING state in the Track object
+            // so t->tick() will continue to write to memory.
             t->tick(inBlock, &tempTrackOut);
 
             // Mix if playing
@@ -144,9 +188,39 @@ public:
             }
         }
 
+        // --- Handle State Transitions (Post-Process) ---
+
+        // 2. Waiting to Finish -> Playback
+        if (state == WAITING_TO_FINISH) {
+            // Check if we hit the quantization multiple
+            // Note: Track::tick() just ran, so length is updated.
+            size_t len = tracks[currentTrackIndex]->getLengthInBlocks();
+            if (len > 0 && quantizationBlocks > 0 && (len % quantizationBlocks == 0)) {
+                tracks[currentTrackIndex]->play();
+                
+                // Update Global Timeline if this track is the longest
+                // (Though with quantization, it should be a multiple of existing, 
+                // so we just ensure timelineLength accommodates it if we want to loop the whole thing)
+                // For a simple looper, usually the first loop sets the 'master' cycle.
+                // But if we record a longer loop (e.g. 2x), we might want to extend the global cycle?
+                // Let's assume we extend timeline to match longest loop for correct wrapping.
+                if (len > timelineLength) {
+                    timelineLength = len;
+                }
+                
+                if (currentTrackIndex < NUM_LOOPS - 1) {
+                    currentTrackIndex++;
+                    state = PLAYBACK; 
+                } else {
+                    state = FULL_PLAYBACK;
+                }
+            }
+        }
+
         // --- Update Global Timeline ---
         if (timelineLength > 0) {
-            // Only advance playhead if we are active (not IDLE)
+            // Only advance playhead if we are active
+            // Note: We advance even if WAITING_*, as we are waiting for a specific time point
             if (state != IDLE) {
                 globalPlayhead++;
                 if (globalPlayhead >= timelineLength) {
@@ -172,6 +246,7 @@ private:
     volatile LooperState state;
     uint32_t globalPlayhead;
     uint32_t timelineLength;
+    uint32_t quantizationBlocks;
 };
 
 #endif // AUDIO_LOOPER_H

@@ -138,13 +138,13 @@ void handleLed() {
             led1.off();
             break;
         case AudioLooper::RECORDING:
-            led1.on(); // Solid ON for recording
-            break;
         case AudioLooper::PLAYBACK:
-            led1.blink(500); // Slow blink for playback
-            break;
         case AudioLooper::FULL_PLAYBACK:
-            led1.blink(250); // Fast blink for full playback
+            led1.on(); 
+            break;
+        case AudioLooper::WAITING_TO_RECORD:
+        case AudioLooper::WAITING_TO_FINISH:
+            led1.blink(250);
             break;
     }
 }
