@@ -56,7 +56,7 @@ public:
                 // If this is the very first loop (timelineLength == 0) OR we are at 0, start immediately
                 // However, requirement says "only ever start ... if globalPlayhead is at 0".
                 // If timelineLength is 0, globalPlayhead is 0.
-                if (globalPlayhead == 0) {
+                if (quantizationBlocks == 0 || (quantizationBlocks > 0 && globalPlayhead % quantizationBlocks == 0)) {
                     LOG("AudioLooper: IDLE -> RECORDING (Track %d) [Immediate]", currentTrackIndex);
                     currentTrack->record();
                     state = RECORDING;
@@ -109,7 +109,7 @@ public:
             case PLAYBACK:
                 // Triggered while playing back: Start Recording Next Loop
                 // Must be quantized start
-                if (globalPlayhead == 0) {
+                if (quantizationBlocks > 0 && globalPlayhead % quantizationBlocks == 0) {
                     LOG("AudioLooper: PLAYBACK -> RECORDING (Track %d) [Immediate]", currentTrackIndex);
                     tracks[currentTrackIndex]->record();
                     state = RECORDING;
@@ -134,6 +134,18 @@ public:
         }
     }
 
+    void reset() {
+        LOG("AudioLooper: RESETTING ALL");
+        for (int i = 0; i < NUM_LOOPS; i++) {
+            if (tracks[i]) tracks[i]->clear();
+        }
+        currentTrackIndex = 0;
+        state = IDLE;
+        globalPlayhead = 0;
+        timelineLength = 0;
+        quantizationBlocks = 0;
+    }
+
     virtual void update(void) {
         audio_block_t *inBlock = receiveReadOnly(0);
         audio_block_t *outBlock = allocate();
@@ -154,7 +166,7 @@ public:
         
         // 1. Waiting to Record -> Recording
         if (state == WAITING_TO_RECORD) {
-            if (globalPlayhead == 0) {
+            if (quantizationBlocks == 0 || (quantizationBlocks > 0 && globalPlayhead % quantizationBlocks == 0)) {
                  tracks[currentTrackIndex]->record();
                  state = RECORDING;
             }

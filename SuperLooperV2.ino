@@ -21,10 +21,11 @@ using namespace BALibrary;
 // Hardware Controls
 // -------------------------------------------------------------------------
 // 1 Switch (FS1), 0 Pots, 0 Encoders, 1 Output (LED1)
-BAPhysicalControls controls(1, 0, 0, 1);
+BAPhysicalControls controls(2, 0, 0, 1);
 
 Led led1(controls, BA_EXPAND_LED1_PIN);
 Footswitch fs1(controls, BA_EXPAND_SW1_PIN);
+Footswitch fs2(controls, BA_EXPAND_SW2_PIN);
 Pot pot1(controls, BA_EXPAND_POT1_PIN);
 
 // -------------------------------------------------------------------------
@@ -123,9 +124,14 @@ void loop() {
 
 void handleFootswitch() {
     fs1.update();
+    fs2.update();
 
     if (fs1.pressed()) {
         looper.trigger();
+    }
+    
+    if (fs2.pressed()) {
+        looper.reset();
     }
 }
 
