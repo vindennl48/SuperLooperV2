@@ -25,11 +25,20 @@ public:
         MemorySd::removeAllFiles();
 
         // Create 2x loops allocating to MEM0
-        if (!loop1) loop1 = new MemorySd(0, LOOP_BUFFER_SIZE);
-        if (!loop2) loop2 = new MemorySd(0, LOOP_BUFFER_SIZE);
+        if (!loop1) {
+          loop1 = new MemorySd(0, LOOP_BUFFER_SIZE);
+          if (loop1) LOG("loop1 Created!");
+        }
+        if (!loop2) {
+          loop2 = new MemorySd(0, LOOP_BUFFER_SIZE);
+          if (loop2) LOG("loop2 Created!");
+        }
 
         // Create 1 input buffer allocating to MEM1
-        if (!inputBuffer) inputBuffer = new MemoryRam(1, LOOP_BUFFER_SIZE);
+        if (!inputBuffer) {
+          inputBuffer = new MemoryRam(1, LOOP_BUFFER_SIZE);
+          if (inputBuffer) LOG("inputBuffer Created!");
+        }
     }
 
     // Call this from the main loop() function as often as possible
@@ -63,7 +72,6 @@ public:
                 LOG("AudioLooper: State RECORDING -> PLAYBACK");
                 // RECORDING -> PLAYBACK
                 state = PLAYBACK;
-                loop1->resetPlayhead(); // Start playing from beginning
                 break;
 
             case PLAYBACK:

@@ -361,6 +361,8 @@ public:
             }
         }
         root.close();
+
+        LOG("Removed all SD Files!");
     }
 
 private:
