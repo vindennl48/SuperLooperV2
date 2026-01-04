@@ -143,5 +143,8 @@ void handleLed() {
         case AudioLooper::PLAYBACK:
             led1.blink(500); // Slow blink for playback
             break;
+        case AudioLooper::FULL_PLAYBACK:
+            led1.blink(250); // Fast blink for full playback
+            break;
     }
 }

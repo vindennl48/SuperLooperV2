@@ -13,12 +13,17 @@ public:
         PLAYBACK
     };
 
-    Track(int ramChipIndex, size_t bufferSize) {
-        memory = new MemorySd(ramChipIndex, bufferSize);
+    Track() {
+        memory = nullptr;
         state = IDLE;
         gain = 1.0f;
         muted = false;
         paused = false;
+    }
+
+    void begin() {
+        if (memory) delete memory;
+        memory = new MemorySd(LOOP_BUFFER_SIZE);
     }
 
     ~Track() {

@@ -136,14 +136,37 @@ protected:
 // -------------------------------------------------------------------------
 class MemorySd {
 public:
-    MemorySd(int ramChipIndex, size_t bufferSizeBlocks) 
+    static inline size_t s_usageMEM0 = 0;
+    static inline size_t s_usageMEM1 = 0;
+    static const size_t MAX_BLOCKS_PER_CHIP = 32768; // 8MB / 256 bytes
+
+    MemorySd(size_t bufferSizeBlocks) 
     {
         ensureSdInit();
         m_uniqueId = getNextId();
         
+        size_t needed = bufferSizeBlocks * 2; // Input + Output buffers
+        int chipIndex = 0;
+
+        if (s_usageMEM0 + needed <= MAX_BLOCKS_PER_CHIP) {
+            chipIndex = 0;
+            s_usageMEM0 += needed;
+        } else if (s_usageMEM1 + needed <= MAX_BLOCKS_PER_CHIP) {
+            chipIndex = 1;
+            s_usageMEM1 += needed;
+        } else {
+            LOG("ERROR: Out of Memory for Track %d", m_uniqueId);
+            chipIndex = 0; // Fallback
+        }
+        
+        m_assignedChipIndex = chipIndex;
+        m_assignedSizeBlocks = needed;
+
+        LOG("Allocating Track %d on MEM%d (Usage: %d/%d blocks)", m_uniqueId, chipIndex, (chipIndex==0 ? s_usageMEM0 : s_usageMEM1), MAX_BLOCKS_PER_CHIP);
+
         // Allocate Input and Output buffers
-        m_inputBuffer = new MemoryRam(ramChipIndex, bufferSizeBlocks);
-        m_outputBuffer = new MemoryRam(ramChipIndex, bufferSizeBlocks);
+        m_inputBuffer = new MemoryRam(chipIndex, bufferSizeBlocks);
+        m_outputBuffer = new MemoryRam(chipIndex, bufferSizeBlocks);
         
         createAndOpenFile();
     }
@@ -152,6 +175,16 @@ public:
         if (m_inputBuffer) delete m_inputBuffer;
         if (m_outputBuffer) delete m_outputBuffer;
         if (m_file) m_file.close();
+        
+        // Return memory to the pool
+        if (m_assignedChipIndex == 0) {
+            if (s_usageMEM0 >= m_assignedSizeBlocks) s_usageMEM0 -= m_assignedSizeBlocks;
+            else s_usageMEM0 = 0;
+        } else {
+            if (s_usageMEM1 >= m_assignedSizeBlocks) s_usageMEM1 -= m_assignedSizeBlocks;
+            else s_usageMEM1 = 0;
+        }
+        LOG("Freed Track %d from MEM%d", m_uniqueId, m_assignedChipIndex);
     }
 
     // --- Audio Thread Interface (ISR Safe via MemoryRam) ---
@@ -257,6 +290,9 @@ private:
     int m_uniqueId;
     String m_binFileName;
     File m_file;
+    
+    int m_assignedChipIndex = 0;
+    size_t m_assignedSizeBlocks = 0;
     
     MemoryRam* m_inputBuffer = nullptr;
     MemoryRam* m_outputBuffer = nullptr;

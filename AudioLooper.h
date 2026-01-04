@@ -10,12 +10,15 @@ public:
     enum LooperState {
         IDLE,
         RECORDING,
-        PLAYBACK
+        PLAYBACK,
+        FULL_PLAYBACK
     };
 
     AudioLooper(void) : AudioStream(1, inputQueueArray) {
-        track1 = nullptr;
-        track2 = nullptr;
+        for (int i = 0; i < NUM_LOOPS; i++) {
+            tracks[i] = new Track();
+        }
+        currentTrackIndex = 0;
         state = IDLE;
         globalPlayhead = 0;
         timelineLength = 0;
@@ -25,57 +28,75 @@ public:
         // Clear SD card state on startup for a fresh session
         MemorySd::removeAllFiles();
 
-        // Create Track 1 on MEM0
-        if (!track1) {
-            track1 = new Track(0, LOOP_BUFFER_SIZE); 
-            if (track1) LOG("AudioLooper: Track1 created on MEM0");
-        }
-        
-        // Create Track 2 on MEM1 (Reserved)
-        if (!track2) {
-            track2 = new Track(1, LOOP_BUFFER_SIZE);
-            if (track2) LOG("AudioLooper: Track2 created on MEM1");
+        for (int i = 0; i < NUM_LOOPS; i++) {
+            if (tracks[i]) {
+                tracks[i]->begin();
+                LOG("AudioLooper: Track %d initialized", i);
+            }
         }
     }
 
     // Call this from the main loop() function frequently
     void poll() {
-        if (track1) track1->poll();
-        if (track2) track2->poll();
+        for (int i = 0; i < NUM_LOOPS; i++) {
+            if (tracks[i]) tracks[i]->poll();
+        }
     }
 
     void trigger() {
+        Track* currentTrack = tracks[currentTrackIndex];
+        if (!currentTrack) return;
+
         switch (state) {
             case IDLE:
-                // Start Recording Loop 1
-                LOG("AudioLooper: IDLE -> RECORDING");
-                if (track1) {
-                    track1->record();
-                    timelineLength = 0; // Reset timeline
-                    globalPlayhead = 0;
-                }
+                // Start Recording First Loop
+                LOG("AudioLooper: IDLE -> RECORDING (Track %d)", currentTrackIndex);
+                currentTrack->record();
+                
+                // Reset Global Time only on fresh start
+                timelineLength = 0;
+                globalPlayhead = 0;
+                
                 state = RECORDING;
                 break;
 
             case RECORDING:
-                // Stop Recording Loop 1, Start Playback
-                LOG("AudioLooper: RECORDING -> PLAYBACK");
-                if (track1) {
-                    track1->play();
-                    // Set Global Timeline based on the first loop
-                    timelineLength = track1->getLengthInBlocks();
-                    LOG("AudioLooper: Timeline set to %d blocks", timelineLength);
+                // Stop Recording Current Loop, Start Playback
+                LOG("AudioLooper: RECORDING -> PLAYBACK (Track %d)", currentTrackIndex);
+                currentTrack->play();
+                
+                // Update Global Timeline if this track is the longest so far
+                if (currentTrack->getLengthInBlocks() > timelineLength) {
+                    timelineLength = currentTrack->getLengthInBlocks();
+                    LOG("AudioLooper: Timeline updated to %d blocks", timelineLength);
                 }
-                globalPlayhead = 0;
-                state = PLAYBACK;
+                
+                // Check if we have more loops to record
+                if (currentTrackIndex < NUM_LOOPS - 1) {
+                    currentTrackIndex++;
+                    state = PLAYBACK; // Ready for next trigger to record
+                } else {
+                    state = FULL_PLAYBACK; // All loops recorded
+                    LOG("AudioLooper: All Tracks Recorded -> FULL_PLAYBACK");
+                }
+                
+                // NOTE: We do NOT reset globalPlayhead here to keep time continuity.
                 break;
 
             case PLAYBACK:
-                // Stop Playback
-                LOG("AudioLooper: PLAYBACK -> IDLE");
-                if (track1) {
-                    track1->stop();
+                // Triggered while playing back (and not full): Start Recording Next Loop
+                LOG("AudioLooper: PLAYBACK -> RECORDING (Track %d)", currentTrackIndex);
+                tracks[currentTrackIndex]->record();
+                state = RECORDING;
+                break;
+                
+            case FULL_PLAYBACK:
+                // Triggered while everything is full: Stop All
+                LOG("AudioLooper: FULL_PLAYBACK -> IDLE (Reset)");
+                for(int i=0; i<NUM_LOOPS; i++) {
+                    if(tracks[i]) tracks[i]->stop();
                 }
+                currentTrackIndex = 0;
                 state = IDLE;
                 break;
         }
@@ -99,55 +120,34 @@ public:
 
         // --- Process Tracks ---
         
-        // Track 1
-        if (track1) {
-            // Allocate a temp block for the track to render into
-            // (We could optimize this by summing directly, but Track::tick expects a block to fill)
-            // For now, we reuse the stack-allocated trackBlock logic if we can copy data out.
-            // But Track::tick takes a pointer. We need a real buffer.
-            // Let's use a temporary stack buffer for the track output.
-            
-            // NOTE: Allocating a full audio_block_t on stack is 256 bytes + overhead, safe for T4.1
-            audio_block_t tempTrackOut; 
-            
-            track1->tick(inBlock, &tempTrackOut);
+        // Temporary buffer for mixing
+        audio_block_t tempTrackOut; 
 
-            // Mix Track Output into Main Output
-            // Only mix if we are NOT recording (monitoring is usually dry only)
-            // or if the track is playing back.
-            if (track1->getState() == Track::PLAYBACK || track1->getState() == Track::IDLE) {
-                 for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
-                    int32_t sample = outBlock->data[i] + tempTrackOut.data[i];
+        for (int i = 0; i < NUM_LOOPS; i++) {
+            Track* t = tracks[i];
+            if (!t) continue;
+
+            // Render track
+            t->tick(inBlock, &tempTrackOut);
+
+            // Mix if playing
+            if (t->getState() == Track::PLAYBACK || t->getState() == Track::IDLE) {
+                 for (int s = 0; s < AUDIO_BLOCK_SAMPLES; s++) {
+                    int32_t sample = outBlock->data[s] + tempTrackOut.data[s];
                     
                     // Simple Hard Limiter
                     if (sample > 32767) sample = 32767;
                     if (sample < -32768) sample = -32768;
                     
-                    outBlock->data[i] = (int16_t)sample;
+                    outBlock->data[s] = (int16_t)sample;
                 }
             }
-        }
-        
-        // Track 2 (Placeholder logic)
-        if (track2) {
-            audio_block_t tempTrackOut;
-            track2->tick(inBlock, &tempTrackOut);
-             if (track2->getState() == Track::PLAYBACK) {
-                 for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
-                    int32_t sample = outBlock->data[i] + tempTrackOut.data[i];
-                    if (sample > 32767) sample = 32767;
-                    if (sample < -32768) sample = -32768;
-                    outBlock->data[i] = (int16_t)sample;
-                }
-             }
         }
 
         // --- Update Global Timeline ---
         if (timelineLength > 0) {
-            // Only advance playhead if we are in playback mode? 
-            // Or does time always flow? Usually time flows if the master loop is running.
-            // Since Track1 is master, if it's playing, time flows.
-            if (track1 && track1->isPlaying()) {
+            // Only advance playhead if we are active (not IDLE)
+            if (state != IDLE) {
                 globalPlayhead++;
                 if (globalPlayhead >= timelineLength) {
                     globalPlayhead = 0;
@@ -166,8 +166,8 @@ public:
 
 private:
     audio_block_t *inputQueueArray[1];
-    Track *track1;
-    Track *track2;
+    Track* tracks[NUM_LOOPS];
+    int currentTrackIndex;
     
     volatile LooperState state;
     uint32_t globalPlayhead;
