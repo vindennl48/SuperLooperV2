@@ -52,7 +52,7 @@ public:
             m_storedBlocks++;
             __enable_irq();
         } else {
-             LOG("ERROR: MemoryRam writeAdvance16 failed (MEM%d)", m_memChipIndex);
+            LOG("ERROR: MemoryRam writeAdvance16 failed (MEM%d)", m_memChipIndex);
         }
 
         return success;
@@ -153,44 +153,29 @@ public:
     }
 
     /**
-     * @brief Resets the RAM buffer and deletes/recreates the SD file.
-     *        Also resets the playhead.
+     * @brief Resets the RAM buffer and schedules a file reset.
+     *        File deletion/recreation happens in update().
      */
-    void reset() override {
-        // Reset the RAM buffer first
+    void clearLoop() {
+        // Reset the RAM buffer first (instant)
         MemoryRam::reset();
         
         m_playhead = 0;
         m_fileSizeInBlocks = 0;
-
-        // Close and recreate the file
-        if (m_file) {
-            m_file.close();
-        }
         
-        if (SD.exists(m_binFileName.c_str())) {
-            SD.remove(m_binFileName.c_str());
-        }
-        
-        m_file = SD.open(m_binFileName.c_str(), FILE_WRITE);
-        if (!m_file) {
-            LOG("ERROR: MemorySd reset failed to recreate file: %s", m_binFileName.c_str());
-        }
+        // Schedule heavy SD operations for the next update() call
+        m_shouldClear = true;
     }
 
     /**
      * @brief Resets the playhead to the beginning of the SD file.
-     *        This triggers a reset of the RAM buffer and immediate refill
-     *        from the start of the SD file.
+     *        This triggers a reset of the RAM buffer.
      */
     void resetPlayhead() {
         m_playhead = 0;
         
         // Clear the RAM buffer so we start fresh from the new playhead position
         MemoryRam::reset();
-        
-        // Trigger a refill immediately to pre-load the buffer
-        update();
     }
 
     /**
@@ -198,6 +183,8 @@ public:
      * @param block Pointer to the audio block to be written.
      */
     void writeToSd(audio_block_t* block) {
+        if (m_shouldClear) return; // Wait until cleared
+
         if (!m_file) {
             LOG("ERROR: writeToSd failed - File not open (ID: %d)", m_uniqueId);
             return;
@@ -225,6 +212,26 @@ public:
      *        Handles looping back to the start of the SD file.
      */
     void update() {
+        // Handle deferred clear
+        if (m_shouldClear) {
+            // Close and recreate the file
+            if (m_file) {
+                m_file.close();
+            }
+            
+            if (SD.exists(m_binFileName.c_str())) {
+                SD.remove(m_binFileName.c_str());
+            }
+            
+            m_file = SD.open(m_binFileName.c_str(), FILE_WRITE);
+            if (!m_file) {
+                LOG("ERROR: MemorySd clearLoop failed to recreate file: %s", m_binFileName.c_str());
+            }
+            
+            m_shouldClear = false;
+            return; // Don't try to read immediately after clear
+        }
+
         if (!m_file) {
              return;
         }
@@ -315,6 +322,7 @@ private:
     File m_file;
     size_t m_playhead = 0; // Current read position in the SD file (bytes)
     size_t m_fileSizeInBlocks = 0; // Total number of blocks written to the file
+    bool m_shouldClear = false; // Flag to trigger deferred file reset
 
     // Helper to generate a unique ID for each instance
     static int getNextId() {

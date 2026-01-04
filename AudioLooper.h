@@ -26,6 +26,9 @@ public:
 
     // Call this from the main loop() function as often as possible
     void poll() {
+        // loops should ALWAYS update (handles deferred file operations)
+        loop1->update();
+
         audio_block_t tempBlock;
         
         // 1. Drain the Input Buffer (Recording to SD)
@@ -33,9 +36,6 @@ public:
         while (inputBuffer->pop(&tempBlock)) {
             loop1->writeToSd(&tempBlock);
         }
-
-        // loops should ALWAYS update
-        loop1->update();
     }
 
     void trigger() {
@@ -44,7 +44,7 @@ public:
                 LOG("AudioLooper: State IDLE -> RECORDING");
                 // IDLE -> RECORDING
                 inputBuffer->reset();
-                loop1->reset(); // Clear old loop data
+                loop1->clearLoop(); // Clear old loop data
                 state = RECORDING;
                 break;
 
