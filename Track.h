@@ -116,6 +116,25 @@ public:
 
     // --- Feature Control ---
 
+    // For Late-Start Forgiveness: Inject past audio into the loop
+    void injectBlock(audio_block_t* block) {
+        if (!memory || !block) return;
+        
+        // We assume state is already RECORDING or this is called inside a critical section
+        // effectively simulating a 'tick' that happened in the past
+        memory->writeSample(block);
+        blockCounter++;
+    }
+
+    // For Late-Stop Forgiveness: Trim the tail of the loop
+    void trim(size_t blocksToTrim) {
+        if (blockCounter > blocksToTrim) {
+            blockCounter -= blocksToTrim;
+        } else {
+            blockCounter = 0;
+        }
+    }
+
     void mute() { muted = true; }
     void unmute() { muted = false; }
     void toggleMute() { muted = !muted; }

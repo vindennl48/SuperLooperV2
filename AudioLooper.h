@@ -26,6 +26,10 @@ public:
         globalPlayhead = 0;
         timelineLength = 0;
         quantizationBlocks = 0;
+        
+        // Initialize History
+        historyHead = 0;
+        memset(inputHistory, 0, sizeof(inputHistory));
     }
 
     void begin() {
@@ -92,6 +96,17 @@ public:
         Track* currentTrack = tracks[currentTrackIndex];
         if (!currentTrack) return;
 
+        // Calculate timing relative to quantization grid
+        uint32_t blocksLate = 0;
+        if (quantizationBlocks > 0) {
+            blocksLate = globalPlayhead % quantizationBlocks;
+        }
+
+        // Helper: Check if we are within the forgiveness window (Late Start/Stop)
+        // We only forgive if we have an established timeline (quantizationBlocks > 0)
+        // and we are slightly past the mark (blocksLate > 0).
+        bool isLate = (quantizationBlocks > 0) && (blocksLate > 0) && (blocksLate <= FORGIVENESS_BLOCKS);
+
         switch (state) {
             case IDLE:
                 // Start Recording
@@ -107,6 +122,31 @@ public:
                     if (timelineLength == 0) {
                         // First loop defines the timeline
                     }
+                } else if (isLate) {
+                    // --- Late Start Forgiveness ---
+                    LOG("AudioLooper: IDLE -> RECORDING (Track %d) [Late Start Fix: %d blocks]", currentTrackIndex, blocksLate);
+                    
+                    AudioNoInterrupts();
+                    
+                    // 1. Start Recording (clears counters)
+                    currentTrack->record();
+                    state = RECORDING;
+
+                    // 2. Inject History
+                    // We need to retrieve blocks from T-blocksLate to T-1
+                    // The buffer is at historyHead (which is where the NEXT sample goes, so historyHead-1 is the newest)
+                    audio_block_t tempBlock;
+                    
+                    for (uint32_t i = blocksLate; i > 0; i--) {
+                        // Calculate index: (head - i + size) % size
+                        int idx = (historyHead - i + FORGIVENESS_BLOCKS) % FORGIVENESS_BLOCKS;
+                        
+                        memcpy(tempBlock.data, inputHistory[idx], sizeof(tempBlock.data));
+                        currentTrack->injectBlock(&tempBlock);
+                    }
+                    
+                    AudioInterrupts();
+
                 } else {
                     LOG("AudioLooper: IDLE -> WAITING_TO_RECORD (Track %d)", currentTrackIndex);
                     state = WAITING_TO_RECORD;
@@ -143,9 +183,36 @@ public:
                         state = FULL_PLAYBACK;
                     }
                 } else {
-                    // Subsequent Loops: Wait for Quantization
-                    LOG("AudioLooper: RECORDING -> WAITING_TO_FINISH (Track %d)", currentTrackIndex);
-                    state = WAITING_TO_FINISH;
+                    // Subsequent Loops
+                    if (isLate) {
+                        // --- Late Stop Forgiveness ---
+                        LOG("AudioLooper: RECORDING -> PLAYBACK (Track %d) [Late Stop Fix: %d blocks]", currentTrackIndex, blocksLate);
+                        
+                        AudioNoInterrupts();
+                        currentTrack->trim(blocksLate); // Cut the extra blocks
+                        currentTrack->play();
+                        AudioInterrupts();
+                        
+                        // Advance State Logic (Copied from WAITING_TO_FINISH handler)
+                        if (currentTrackIndex >= activeTrackCount) {
+                            activeTrackCount = currentTrackIndex + 1;
+                        }
+                        // Update Global Timeline if extended (unlikely if trimming, but safety check)
+                        if (currentTrack->getLengthInBlocks() > timelineLength) {
+                            timelineLength = currentTrack->getLengthInBlocks();
+                        }
+                        
+                        if (currentTrackIndex < NUM_LOOPS - 1) {
+                            currentTrackIndex++;
+                            state = PLAYBACK; 
+                        } else {
+                            state = FULL_PLAYBACK;
+                        }
+                        
+                    } else {
+                        LOG("AudioLooper: RECORDING -> WAITING_TO_FINISH (Track %d)", currentTrackIndex);
+                        state = WAITING_TO_FINISH;
+                    }
                 }
                 break;
             
@@ -173,6 +240,23 @@ public:
                     LOG("AudioLooper: PLAYBACK -> RECORDING (Track %d) [Immediate]", currentTrackIndex);
                     tracks[currentTrackIndex]->record();
                     state = RECORDING;
+                } else if (isLate) {
+                    // --- Late Start Forgiveness (Branching/Overdub/Next Track) ---
+                    LOG("AudioLooper: PLAYBACK -> RECORDING (Track %d) [Late Start Fix: %d blocks]", currentTrackIndex, blocksLate);
+
+                    AudioNoInterrupts();
+                    // 1. Start
+                    tracks[currentTrackIndex]->record();
+                    state = RECORDING;
+                    
+                    // 2. Inject
+                    audio_block_t tempBlock;
+                    for (uint32_t i = blocksLate; i > 0; i--) {
+                        int idx = (historyHead - i + FORGIVENESS_BLOCKS) % FORGIVENESS_BLOCKS;
+                        memcpy(tempBlock.data, inputHistory[idx], sizeof(tempBlock.data));
+                        tracks[currentTrackIndex]->injectBlock(&tempBlock);
+                    }
+                    AudioInterrupts();
                 } else {
                     LOG("AudioLooper: PLAYBACK -> WAITING_TO_RECORD (Track %d)", currentTrackIndex);
                     state = WAITING_TO_RECORD;
@@ -185,23 +269,8 @@ public:
                 for(int i=0; i<NUM_LOOPS; i++) {
                     if(tracks[i]) tracks[i]->stop();
                 }
-                // NOTE: We do NOT clear tracks here, just stop.
-                // But per "Reset" logic in original code, it reset everything. 
-                // However, standard looper behavior for a "Stop" button is usually Stop.
-                // But the user mapped FS2 to "Clear/Reset".
-                // FS1 trigger on FULL_PLAYBACK usually means Stop or Undo? 
-                // Original code: "FULL_PLAYBACK -> IDLE (Reset)" and cleared vars but not tracks explicitly in loop, 
-                // but reset currentTrackIndex etc.
-                // Let's keep it as a Stop/Reset of state, but not data clearing. 
-                // Actually, if we go to IDLE, and activeTrackCount > 0, we can probably start playing again?
-                // For now, adhering to previous logic which effectively reset the session state.
-                
-                // Update: If we stop, we probably want to keep the data?
-                // The original code did: currentTrackIndex = 0; state = IDLE; timelineLength = 0; ...
-                // This effectively clears the session "logic" but maybe not the buffers?
-                // Let's assume this is a "Stop All" and we can restart.
-                // But to be safe and simple, let's treat it as a Soft Reset.
-                
+
+                // Full reset everything
                 currentTrackIndex = 0;
                 // We keep activeTrackCount? No, if we reset timelineLength, we break sync.
                 // Let's Reset Completely for now to avoid complexity of "Resume".
@@ -244,6 +313,19 @@ public:
             if (inBlock) release(inBlock);
             return;
         }
+
+        // --- Input History Management ---
+        if (inBlock) {
+            // Copy input to history buffer for Stomp Forgiveness
+            memcpy(inputHistory[historyHead], inBlock->data, sizeof(inputHistory[0]));
+        } else {
+            // Record silence if no block
+            memset(inputHistory[historyHead], 0, sizeof(inputHistory[0]));
+        }
+        // Advance Head
+        historyHead++;
+        if (historyHead >= FORGIVENESS_BLOCKS) historyHead = 0;
+
 
         // Initialize Output with Dry Signal or Silence
         if (inBlock) {
@@ -366,6 +448,10 @@ private:
     uint32_t globalPlayhead;
     uint32_t timelineLength;
     uint32_t quantizationBlocks;
+
+    // Forgiveness History
+    int16_t inputHistory[FORGIVENESS_BLOCKS][AUDIO_BLOCK_SAMPLES];
+    int historyHead;
 };
 
 #endif // AUDIO_LOOPER_H

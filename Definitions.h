@@ -22,4 +22,8 @@
 
 #define HEADPHONE_VOLUME 0.8f
 
+// --- Feature Settings ---
+#define FORGIVENESS_MS 300
+#define FORGIVENESS_BLOCKS (((FORGIVENESS_MS * SAMPLE_RATE) / 1000) / 128 + 1)
+
 #endif // DEFINITIONS_H
