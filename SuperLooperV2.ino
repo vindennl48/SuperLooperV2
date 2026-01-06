@@ -77,7 +77,7 @@ void setup() {
     // Allocate Audio Memory
     // 128 blocks is generally sufficient for standard audio path,
     // but the RingBuffers in MemoryRam manage their own external memory.
-    AudioMemory(128);
+    AudioMemory(BLOCK_SIZE);
     
     // Initialize Looper (Allocates Memory/SD structures)
     looper.begin();

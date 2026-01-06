@@ -20,6 +20,8 @@ public:
         muted = false;
         paused = false;
         blockCounter = 0;
+        fadeStep = 0;
+        fadeGain = 0.0f;
     }
 
     void begin() {
@@ -55,8 +57,8 @@ public:
         }
         
         // --- PLAYBACK ---
-        else if (state == PLAYBACK) {
-            if (paused) {
+        else if (state == PLAYBACK || state == IDLE) {
+            if ((paused || state == IDLE) && fadeStep == 0) {
                 // If paused, we output silence and do NOT advance the read head (do not call readSample)
                 return; 
             }
@@ -67,11 +69,16 @@ public:
             
             if (hasData) {
                 // Determine effective gain (Mute overrides level to 0.0)
-                float effectiveGain = muted ? 0.0f : gain;
+                float effectiveGain = gain;
 
                 // Always process gain to support future micro-fading
                 for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
-                    int32_t val = (int32_t)(output->data[i] * effectiveGain);
+                    if ((muted || paused || state == IDLE) && fadeStep > 0) fadeStep--;
+                    else if (fadeStep < FADE_SAMPLES) fadeStep++;
+
+                    effectiveGain *= ((float)fadeStep/FADE_SAMPLES);
+
+                    int32_t val = (int32_t)(output->data[i] * effectiveGain;
                     
                     // Simple Hard Limiter
                     if (val > 32767) val = 32767;
@@ -168,6 +175,8 @@ private:
     bool muted;
     bool paused;
     volatile uint32_t blockCounter;
+    uint16_t fadeStep;
+    float fadeGain;
 };
 
 #endif // TRACK_H

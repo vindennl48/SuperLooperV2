@@ -9,21 +9,31 @@
     #define LOG(...)
 #endif
 
-// --- Hardware Calibration ---
+// --- Hardware ---
 #define POT_CALIB_MIN 0
 #define POT_CALIB_MAX 1021
+#define HEADPHONE_VOLUME 0.8f
 
 // --- Audio Settings ---
 #define BIT_RATE 16
 #define SAMPLE_RATE 44100
 #define TOTAL_SRAM_SAMPLES 8388608
+#define BLOCK_SIZE 128
 #define LOOP_BUFFER_SIZE 2048
 #define NUM_LOOPS 8
 
-#define HEADPHONE_VOLUME 0.8f
+// Helpers
+#define SAMPLES_TO_BYTES(x) (x * (BIT_RATE / 8))
+#define MS_TO_SAMPLES(x) ((x * SAMPLE_RATE) / 1000)
+#define SAMPLES_TO_MS(x) ((x * 1000) / SAMPLE_RATE)
+#define WRAP_NUM(i, add, max) (i % (max + add))
 
-// --- Feature Settings ---
+// Fade Settings
+#define FADE_DURATION_MS 10
+#define FADE_SAMPLES MS_TO_SAMPLES(FADE_DURATION_MS)
+
+// --- Stomp-Forgiveness Settings ---
 #define FORGIVENESS_MS 300
-#define FORGIVENESS_BLOCKS (((FORGIVENESS_MS * SAMPLE_RATE) / 1000) / 128 + 1)
+#define FORGIVENESS_BLOCKS (MS_TO_SAMPLES(FORGIVENESS_MS) / BLOCK_SIZE + 1)
 
 #endif // DEFINITIONS_H
