@@ -26,11 +26,10 @@
 #define SAMPLES_TO_BYTES(x) (x * (BIT_RATE / 8))
 #define MS_TO_SAMPLES(x) ((x * SAMPLE_RATE) / 1000)
 #define SAMPLES_TO_MS(x) ((x * 1000) / SAMPLE_RATE)
-#define WRAP_NUM(i, add, max) (i % (max + add))
+#define SAMPLE_LIMITER(x) (x > 32767 ? 32767 : (x < -32768 ? -32768 : x))
 
 // Fade Settings
-#define FADE_DURATION_MS 10
-#define FADE_SAMPLES MS_TO_SAMPLES(FADE_DURATION_MS)
+#define FADE_DURATION_BLOCKS 3
 
 // --- Stomp-Forgiveness Settings ---
 #define FORGIVENESS_MS 300

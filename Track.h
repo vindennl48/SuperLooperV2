@@ -3,180 +3,199 @@
 
 #include <AudioStream.h>
 #include "Definitions.h"
-#include "Memory.h"
+#include "Ram.h"
 
 class Track {
 public:
-    enum TrackState {
-        IDLE,
-        RECORDING,
-        PLAYBACK
-    };
+  enum State {
+    NORMAL,
+    MUTE,
+    RESUME,
+    STOP
+  };
 
-    Track() {
-        memory = nullptr;
-        state = IDLE;
-        gain = 1.0f;
-        muted = false;
-        paused = false;
-        blockCounter = 0;
-        fadeStep = 0;
-        fadeGain = 0.0f;
+  Track(Ram* ram) : ram(ram)
+  {
+    hardReset();
+  }
+  ~Track() {}
+
+  // Run in audio interrupt loop
+  void update(audio_block_t* inBlock, audio_block_t* outBlock) {
+    // Always ensure output is silent initially
+    if (outBlock) memset(outBlock->data, 0, sizeof(outBlock->data));
+    else return;
+
+    if (!address) return; // if we dont have RAM addr, we have nothing to play!
+
+    if (state == MUTE) mute(true); else mute(false);
+    if (state == STOP) {
+      mute(true);
+      if (isMuted()) return;
+    }
+    if (state == RESUME) {
+      // mute(false);
+      gain = 1.0f; gainTarget = 1.0f; // fadeTarget will take care of micro-fade
+      state = NORMAL;
+      playhead = 0;
+      isOverdub = false;
     }
 
-    void begin() {
-        if (memory) delete memory;
-        memory = new MemorySd(LOOP_BUFFER_SIZE);
+    size_t addrOffset = playhead * AUDIO_BLOCK_SAMPLES * 2;
+
+    if (isTimelineLocked) { // PLAYBACK
+      ram->read16(address + addrOffset, outBlock->data, AUDIO_BLOCK_SAMPLES);
+
+      if (isOverdub) processOverdub(inBlock, outBlock, addrOffset); // OVERDUB
+      setFadeTarget();
+      processOutput(outBlock);
+
+      // playhead advance && micro-fades
+      playhead++; if (playhead >= timeline) playhead = 0;
+    }
+    else { // RECORD
+      ram->write16(address + addrOffset, inBlock->data, AUDIO_BLOCK_SAMPLES);
+      timeline++;
+    }
+  }
+
+  void mute(bool willMute) {
+    setGain(willMute ? 0.0f : 1.0f);
+  }
+
+  bool isMuted() {
+    if (gain == 0.0f) return true;
+    return false;
+  }
+
+  /*
+   * newAddress: can be 0 if we are overdubbing
+   * */
+  void startRecording(size_t newAddress) {
+    if (address) {  // already have data
+      isOverdub = true;
+      return;
+    }
+    if (!newAddress) return;  // cant overdub with 0 address
+
+    // if we got this far, we have no data so safe to hardReset
+    hardReset();
+    address = newAddress; // setting mem address will trigger record
+  }
+
+  void stopRecording() {
+    if (!address) return; // nothing to do!
+
+    if (isOverdub) {
+      isOverdub = false;
+      return;
     }
 
-    ~Track() {
-        if (memory) delete memory;
-    }
+    isTimelineLocked = true;
+  }
 
-    // Call this from the main loop() for SD card maintenance
-    void poll() {
-        if (memory) memory->update();
-    }
+  void stop() {
+    if (!isTimelineLocked) return;
+    state = STOP;
+  }
 
-    // Audio Interrupt Handler
-    // input: Audio block from the mixer (dry signal) to be recorded
-    // output: Buffer to fill with playback audio
-    void tick(audio_block_t* input, audio_block_t* output) {
-        // Always ensure output is silent initially
-        if (output) memset(output->data, 0, sizeof(output->data));
-        else return; // Should not happen if caller allocates correctly
+  bool isStopped() {
+    if (state == STOP && isMuted()) return true;
+    return false;
+  }
 
-        if (!memory) return;
-
-        // --- RECORDING ---
-        if (state == RECORDING) {
-            if (input) {
-                memory->writeSample(input);
-                blockCounter++;
-            }
-        }
-        
-        // --- PLAYBACK ---
-        else if (state == PLAYBACK || state == IDLE) {
-            if ((paused || state == IDLE) && fadeStep == 0) {
-                // If paused, we output silence and do NOT advance the read head (do not call readSample)
-                return; 
-            }
-
-            // Attempt to read from memory
-            // We read directly into the output block
-            bool hasData = memory->readSample(output);
-            
-            if (hasData) {
-                // Determine effective gain (Mute overrides level to 0.0)
-                float effectiveGain = gain;
-
-                // Always process gain to support future micro-fading
-                for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
-                    if ((muted || paused || state == IDLE) && fadeStep > 0) fadeStep--;
-                    else if (fadeStep < FADE_SAMPLES) fadeStep++;
-
-                    effectiveGain *= ((float)fadeStep/FADE_SAMPLES);
-
-                    int32_t val = (int32_t)(output->data[i] * effectiveGain;
-                    
-                    // Simple Hard Limiter
-                    if (val > 32767) val = 32767;
-                    else if (val < -32768) val = -32768;
-                    
-                    output->data[i] = (int16_t)val;
-                }
-            } else {
-                // Buffer underrun or empty, output is already silenced by memset above
-            }
-        }
-    }
-
-    // --- State Control ---
-
-    void record() {
-        if (state == IDLE) {
-            memory->clearLoop();
-            blockCounter = 0;
-            state = RECORDING;
-            paused = false;
-        }
-    }
-
-    void play() {
-        if (state == RECORDING) {
-            memory->finishRecording();
-            state = PLAYBACK;
-        } else if (state == IDLE && getLengthInBlocks() > 0) {
-            if (memory) memory->restartPlayback();
-            state = PLAYBACK;
-        }
-        paused = false;
-    }
-
-    void stop() {
-        // Depending on design, stop might reset position or just go to IDLE
-        state = IDLE;
-        paused = false;
-        memory->restartPlayback(); // Reset cursors
-    }
-
-    // --- Feature Control ---
-
-    // For Late-Start Forgiveness: Inject past audio into the loop
-    void injectBlock(audio_block_t* block) {
-        if (!memory || !block) return;
-        
-        // We assume state is already RECORDING or this is called inside a critical section
-        // effectively simulating a 'tick' that happened in the past
-        memory->writeSample(block);
-        blockCounter++;
-    }
-
-    // For Late-Stop Forgiveness: Trim the tail of the loop
-    void trim(size_t blocksToTrim) {
-        if (blockCounter > blocksToTrim) {
-            blockCounter -= blocksToTrim;
-        } else {
-            blockCounter = 0;
-        }
-    }
-
-    void mute() { muted = true; }
-    void unmute() { muted = false; }
-    void toggleMute() { muted = !muted; }
-
-    void pause() { paused = true; }
-    void resume() { paused = false; }
-    void togglePause() { paused = !paused; }
-
-    void setGain(float g) { gain = g; }
-    
-    void clear() {
-        memory->clearLoop();
-        state = IDLE;
-        paused = false;
-        blockCounter = 0;
-    }
-
-    // --- Getters ---
-
-    bool isPlaying() const { return state == PLAYBACK && !paused; }
-    bool isRecording() const { return state == RECORDING; }
-    bool isPaused() const { return paused; }
-    bool isMuted() const { return muted; }
-    size_t getLengthInBlocks() const { return blockCounter; }
-    TrackState getState() const { return state; }
+  void resume() {
+    if (!isTimelineLocked) return;
+    state = RESUME;
+  }
 
 private:
-    MemorySd* memory;
-    volatile TrackState state;
-    float gain;
-    bool muted;
-    bool paused;
-    volatile uint32_t blockCounter;
-    uint16_t fadeStep;
-    float fadeGain;
+  // Amount to increment or decrement fade by
+  static const float fadeStep = 1.0f / (FADE_DURATION_BLOCKS * AUDIO_BLOCK_SAMPLES);
+
+  Ram* ram;
+  volatile State state;
+  volatile size_t address; // start pos in ram
+  float gain;
+  volatile float gainTarget;
+  float fadeGain;
+  float fadeTarget;
+  uint32_t timeline;  // length of track in audio blocks
+  uint32_t playhead;  // pos on timeline in audio blocks
+  volatile uint32_t startPos;  // loop start pos on global timeline
+  volatile bool isTimelineLocked;  // have we recorded a full loop
+  volatile bool isOverdub;
+
+  void hardReset() {
+    AudioNoInterrupts();
+
+    address = 0; // must be 1 or greater to signfiy we have data
+    state = NORMAL; // normal operation
+    gain = 1.0f;
+    gainTarget = 1.0f;
+    fadeGain = 0.0f;
+    fadeTarget = 0.0f;
+    timeline = 0;
+    playhead = 0;
+    startPos = 0;
+    isTimelineLocked = false;
+    isOverdub = false;
+
+    AudioInterrupts();
+  }
+
+  void setGain(float newGain) {
+    gainTarget = newGain;
+  }
+
+  void processOutput(audio_block_t* block) {
+    for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
+      int32_t sample = block->data[i];
+      processFade(&fadeGain, &fadeTarget);
+      processFade(&gain, &gainTarget);
+      sample *= gain;                   // appply gain
+      sample *= fadeGain;               // appply fade
+      sample = SAMPLE_LIMITER(sample);  // hard limiter
+      block->data[i] = (int16_t)sample; // send sample
+    }
+  }
+
+  void processOverdub(audio_block_t* inBlock, audio_block_t* outBlock, size_t addrOffset) {
+    if (!inBlock) return;
+
+    int16_t mixBuffer[AUDIO_BLOCK_SAMPLES];
+
+    for (int i=0; i < AUDIO_BLOCK_SAMPLES; i++) {
+      int32_t sum = outBlock->data[i] + inBlock->data[i];
+      mixBuffer[i] = SAMPLE_LIMITER(sum);
+    }
+
+    ram->write16(address + addrOffset, mixBuffer, AUDIO_BLOCK_SAMPLES);
+  }
+
+  void processFade(float* gain, volatile float* target) {
+    // if we are within a reasonable margin, lets call it even
+    if (*gain < *target + 0.001f && *gain > *target - 0.001f) *gain = *target;
+
+    if (*gain == *target) return;
+    if (*target > *gain) {
+      *gain += fadeStep;
+      if (*gain > 0.99f) *gain = 1.0f;
+    }
+    else {
+      *gain -= fadeStep;
+      if (*gain < 0.01f) *gain = 0.0f;
+    }
+  }
+
+  void setFadeTarget() {
+    // only during playback
+    if (playhead >= timeline - FADE_DURATION_BLOCKS) {
+      fadeTarget = 0.0f; // end of loop
+    }
+    else if (playhead == 0) fadeGain = 0.0f; // guarantee 0.0f at playhead start
+    else fadeTarget = 1.0f; // start of loop
+  }
 };
 
-#endif // TRACK_H
+#endif
