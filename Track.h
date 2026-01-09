@@ -4,6 +4,7 @@
 #include <AudioStream.h>
 #include "Definitions.h"
 #include "Ram.h"
+#include "GainControl.h"
 
 class Track {
 public:
@@ -13,64 +14,142 @@ public:
   }
   ~Track() {}
 
-  void trigger() {
-    if (!address) return;
-
-    if (!init) { // START RECORDING
-      hardReset();
-      recGainTarget = 1.0f;
-      init = true;
-      return;
-    }
-
-    if (!isTimelineLocked) { // STOP RECORDING
-      // since we are modifying the timeline var, we need to prevent the
-      // audio interrupt loop from taking over during this process.
-      AudioNoInterrupts();
-      isTimelineLocked = true;
-      recGainTarget = 0.0f;
-      if (timeline > 0) timeline--; // we are always 1 emtpy block ahead during recording
-      AudioInterrupts();
-    }
-    else {  // Toggle OVERDUB
-      // toggle recGainTarget for overdub
-      recGainTarget = recGainTarget > 0.0f ? 0.0f : 1.0f;
-      return;
-    }
-
-  }
-
+  // Audio Interrupt Callback
   void update(audio_block_t* inBlock, audio_block_t* outBlock) {
     // --- Safety Checks ---
     // Output Block should already be zeroed coming in!!
     if (!inBlock || !outBlock || !address) return; // if RAM addr = 0, we have nothing to play!
-    if (playhead > timeline) playhead = 0;
 
-    if (stopped && !muteGain) { // stopped and micro-fade complete
+    if (isTimelineLocked && playhead >= timeline) {
+      playhead = 0;
+      gc_xfade.hardReset(1.0f);
+      gc_xfade.mute();
+    }
+
+    if (stopped && gc_volume.isDone()) { // stopped and micro-fade complete
       playhead = 0;
       return;
     }
 
-    size_t addrOffset = playhead * AUDIO_BLOCK_SAMPLES * 2;
-    if (isTimelineLocked)
+    /*
+     * Tasks for the update loop:
+     *   - record fade in
+     *   - record full loop
+     *   - playback loop while recording xfade
+     *   - mix in xfade to front of loop
+     *   - continue playback
+     *   - overdub & stop & start track
+     *   - update track volume
+     * */
+
+    int16_t tmp_inBlock[AUDIO_BLOCK_SAMPLES];
+    int16_t tmp_xfadeBlock[AUDIO_BLOCK_SAMPLES];
+    size_t addrOffset, xfadeOffset;
+    bool recordActive = !gc_record.isMuted() || !gc_record.isDone();
+
+    if (isTimelineLocked) {
+      addrOffset = playhead * AUDIO_BLOCK_SAMPLES * 2;
+
+      // --- Processing CROSS FADE ---
+      // once xfadeRecord reaches FADE_DURATION_BLOCKS, we are done
+      // recording xfade
+      if (xfadeBlockCount < FADE_DURATION_BLOCKS) {
+        xfadeOffset = (timeline + xfadeBlockCount) * AUDIO_BLOCK_SAMPLES * 2;
+        ram->write16(address + xfadeOffset, inBlock->data, AUDIO_BLOCK_SAMPLES);
+        xfadeBlockCount++;
+      }
+      else if (playhead < FADE_DURATION_BLOCKS) {
+        xfadeOffset = (timeline + playhead) * AUDIO_BLOCK_SAMPLES * 2;
+        ram->read16(address + xfadeOffset, tmp_xfadeBlock, AUDIO_BLOCK_SAMPLES);
+      }
+      // -----------------------------
+
+      // load playback block from ram
       ram->read16(address + addrOffset, outBlock->data, AUDIO_BLOCK_SAMPLES);
-
-    processBlock(inBlock, outBlock);
-
-    if (recGain) {
-      ram->write16(address + addrOffset, inBlock->data, AUDIO_BLOCK_SAMPLES);
-      if (!isTimelineLocked) timeline++;
     }
-    playhead++;
+    else {
+      addrOffset = timeline * AUDIO_BLOCK_SAMPLES * 2;
+    }
+
+    // --- Individual Sample Processing ---
+    for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
+      int32_t s_in = inBlock->data[i];
+      int32_t s_out = outBlock->data[i];
+
+      // --- Processing IN Block ---
+      if (recordActive) {
+        s_in *= gc_record.get(i); // fade in/out gain value
+
+        if (isTimelineLocked) { // if we have a base-loop
+          s_in += s_out; // mix in base-loop
+          s_in = SAMPLE_LIMITER(s_in);  // hard limiter
+        }
+
+        tmp_inBlock[i] = (int16_t)s_in;
+      }
+      // ---------------------------
+
+      // --- Processing OUT Block ---
+      if (isXfadeComplete() && playhead < FADE_DURATION_BLOCKS) {
+        s_out += (int32_t)tmp_xfadeBlock[i] * gc_xfade.get(i);
+      }
+      s_out *= gc_volume.get(i);
+      s_out = SAMPLE_LIMITER(s_out);  // hard limiter
+      outBlock->data[i] = (int16_t)s_out;
+      // ----------------------------
+    }
+    // ------------------------------------
+
+    if (recordActive) {
+      // this takes care of recording the base-loop as well as any
+      // overdub loops
+      ram->write16(address + addrOffset, tmp_inBlock, AUDIO_BLOCK_SAMPLES);
+    }
+
+    if (!isTimelineLocked) timeline++;
+    else playhead++;
   }
 
-  void setMemAddress(size_t n_address) {
-    address = n_address;
+  /*
+   * Make sure we set address before starting to record!
+   * TODO: Integrate dynamic allocation via Track Static Methods
+   * */
+  void startRecording() { startRecording(0); }
+  void startRecording(size_t n_address) {
+    if (!address) address = n_address;
+    if (!address) return;
+
+    if (!init) { // START RECORDING
+      hardReset();
+      gc_record.unmute();
+      init = true;
+      return;
+    }
+
+    if (isTimelineLocked && isXfadeComplete && gc_record.isDone()) {
+      gc_record.unmute(); // start overdub
+    }
+  }
+
+  void stopRecording() {
+    if (!address || !init) return;
+
+    if (!isTimelineLocked) {
+      // STOP RECORDING
+      AudioNoInterrupts();
+      isTimelineLocked = true;
+      gc_record.mute();
+      playhead = 0;
+      AudioInterrupts();
+    }
+    else if (isTimelineLocked && isXfadeComplete && gc_record.isDone()) {
+      gc_record.mute(); // stop overdub
+    }
   }
 
   void mute(bool willMute) {
-    muteGainTarget = willMute ? 0.0f : 1.0f;
     muted = willMute;
+    gc_volume.mute(muted);
   }
 
   bool isMuted() {
@@ -79,98 +158,54 @@ public:
 
   void stop(bool willStop) {
     stopped = willStop;
-    muteGainTarget = willStop || muted ? 0.0f : 1.0f;
+    gc_volume.mute(willStop || muted);
   }
 
   bool isStopped() {
     return stopped;
   }
 
-  void setGain(float newGain) {
-    gainTarget = newGain;
+  void setVolume(float n_volume) {
+    gc_volume.setGain(n_volume);
   }
 
   void clear() {
-    if (!stopped || muteGain) return;
+    if (!stopped || !gc_volume.isDone()) return;
     hardReset();
   }
 
-private:
-  // Amount to increment or decrement fade by
-  static const float fadeStep = 1.0f / (FADE_DURATION_BLOCKS * AUDIO_BLOCK_SAMPLES);
+  bool isXfadeComplete() {
+    return xfadeBlockCount >= FADE_DURATION_BLOCKS;
+  }
 
+private:
   Ram* ram;
+  GainControl gc_volume, gc_record, gc_xfade;
   volatile size_t address; // start pos in ram
-  float gain, muteGain, recGain;
-  volatile float gainTarget, muteGainTarget, recGainTarget;
-  volatile uint32_t timeline;  // length of track in audio blocks
-  uint32_t playhead;  // pos on timeline in audio blocks
-  volatile uint32_t startPos;  // loop start pos on global timeline
+  volatile uint32_t playhead;  // pos on timeline in audio blocks
+  volatile uint32_t timeline;  // length of playable loop in audio blocks
+  volatile uint32_t xfadeBlockCount;  // block pos for crossfade samples
   volatile bool isTimelineLocked;  // have we recorded a full loop
   volatile bool stopped;
   volatile bool muted;
-  bool init;
+  volatile bool init;
 
   void hardReset() {
     AudioNoInterrupts();
 
+    gc_volume.hardReset(1.0f);
+    gc_record.hardReset(0.0f);
+    gc_xfade.hardReset(1.0f);
     address = 0; // must be 1 or greater to signfiy we have data
-    gain = 1.0f;
-    muteGain = 0.0f;
-    recGain = 0.0f;
-    gainTarget = 1.0f;
-    muteGainTarget = 0.0f;
-    recGainTarget = 0.0f;
-    timeline = 0;
     playhead = 0;
-    startPos = 0;
+    timeline = 0;
+    xfadeBlockCount = 0;
     isTimelineLocked = false;
     stopped = false;
     muted = false;
     init = false;
 
     AudioInterrupts();
-  }
-
-  void processBlock(audio_block_t* inBlock, audio_block_t* outBlock) {
-    for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
-      int32_t s_in = inBlock->data[i];
-      int32_t s_out = outBlock->data[i];
-
-      processFade(&gain, &gainTarget);
-      processFade(&recGain, &recGainTarget);
-      processFade(&muteGain, &muteGainTarget);
-
-      if (recGain) {
-        s_in *= recGain;
-        s_in += s_out;
-        s_in = SAMPLE_LIMITER(s_in);  // hard limiter
-        inBlock->data[i] = (int16_t)s_in;
-      }
-
-      s_out *= gain * muteGain;
-      s_out = SAMPLE_LIMITER(s_out);  // hard limiter
-      outBlock->data[i] = (int16_t)s_out;
-    }
-  }
-
-  void processFade(float* gain, volatile float* target) {
-    if (*gain == *target) return;
-
-    // if we are within a reasonable margin, lets call it even
-    if (*gain < *target + 0.001f && *gain > *target - 0.001f) {
-      *gain = *target;
-      return;
-    }
-
-    if (*target > *gain) {
-      *gain += fadeStep;
-      if (*gain > 0.99f) *gain = 1.0f;
-    }
-    else {
-      *gain -= fadeStep;
-      if (*gain < 0.01f) *gain = 0.0f;
-    }
   }
 };
 

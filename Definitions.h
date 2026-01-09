@@ -21,6 +21,7 @@
 #define BLOCK_SIZE 128
 #define LOOP_BUFFER_SIZE 2048
 #define NUM_LOOPS 8
+#define FEEDBACK_MULTIPLIER 0.95f
 
 // Helpers
 #define SAMPLES_TO_BYTES(x) (x * (BIT_RATE / 8))
