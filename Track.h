@@ -44,9 +44,9 @@ public:
      *   - update track volume
      * */
 
+    int16_t tmp_inBlock[AUDIO_BLOCK_SAMPLES];
+    int16_t tmp_xfadeBlock[AUDIO_BLOCK_SAMPLES];
     size_t addrOffset, xfadeOffset;
-
-    bool recordActive = !gc_record.isMuted() || !gc_record.isDone();
 
     if (isTimelineLocked) {
       addrOffset = BLOCKS_TO_ADDR(playhead);
@@ -80,7 +80,7 @@ public:
       int32_t s_out = outBlock->data[i];
 
       // --- Processing IN Block ---
-      if (recordActive) {
+      if (isRecordActive()) {
         s_in *= gc_record.get(i); // fade in/out gain value
 
         if (isTimelineLocked) { // if we have a base-loop
@@ -103,7 +103,7 @@ public:
     }
     // ------------------------------------
 
-    if (recordActive) {
+    if (isRecordActive()) {
       // this takes care of recording the base-loop as well as any
       // overdub loops
       ram->write16(address + addrOffset, tmp_inBlock, AUDIO_BLOCK_SAMPLES);
@@ -114,14 +114,18 @@ public:
   }
 
   void startRecording() {
-    // if (!address) address = n_address;
-    // if (!address) return;
-
     AudioNoInterrupts();
     if (!address) {
-      if (lock_nextAvailableAddress) return;
+      if (lock_nextAvailableAddress) {
+        AudioInterrupts();
+        return;
+      }
       address = nextAvailableAddress;
       lock_nextAvailableAddress = true;
+      
+      // Assign allocation ID
+      activeAllocationCount++;
+      allocationId = activeAllocationCount;
     }
     AudioInterrupts();
 
@@ -190,6 +194,18 @@ public:
 
   void clear() {
     if (!stopped || !gc_volume.isDone()) return;
+    
+    // STRICT LIFO CHECK
+    // Only clear if this is the most recently allocated track
+    if (allocationId != activeAllocationCount) return;
+
+    AudioNoInterrupts();
+    // Reclaim memory
+    nextAvailableAddress = address;
+    activeAllocationCount--;
+    allocationId = 0;
+    AudioInterrupts();
+
     hardReset();
   }
 
@@ -212,7 +228,8 @@ private:
   volatile bool stopped;
   volatile bool muted;
   volatile bool init;
-
+  int allocationId;
+  
   void hardReset() {
     AudioNoInterrupts();
 
@@ -227,7 +244,7 @@ private:
     stopped = false;
     muted = false;
     init = false;
-
+    
     AudioInterrupts();
   }
 
@@ -236,11 +253,11 @@ private:
       return end_pos_samples >= TOTAL_SRAM_SAMPLES;
   }
 
-  // Static scratchpad buffers shared by all Track instances to save RAM/Stack
-  static inline int16_t tmp_inBlock[AUDIO_BLOCK_SAMPLES];
-  static inline int16_t tmp_xfadeBlock[AUDIO_BLOCK_SAMPLES];
+  bool isRecordActive() { return !gc_record.isMuted() || !gc_record.isDone(); }
+  
   static inline size_t nextAvailableAddress = 1;
   static inline bool lock_nextAvailableAddress = false;
+  static inline int activeAllocationCount = 0;
 };
 
 #endif
