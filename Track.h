@@ -19,6 +19,8 @@ public:
     // --- Safety Checks ---
     // Output Block should already be zeroed coming in!!
     if (!inBlock || !outBlock || !address) return; // if RAM addr = 0, we have nothing to play!
+    // --- RAM Bounds Check ---
+    if (!isTimelineLocked && isRamOutOfBounds(1)) stopRecording();
 
     if (isTimelineLocked && playhead >= timeline) {
       playhead = 0;
@@ -42,9 +44,8 @@ public:
      *   - update track volume
      * */
 
-    int16_t tmp_inBlock[AUDIO_BLOCK_SAMPLES];
-    int16_t tmp_xfadeBlock[AUDIO_BLOCK_SAMPLES];
     size_t addrOffset, xfadeOffset;
+
     bool recordActive = !gc_record.isMuted() || !gc_record.isDone();
 
     if (isTimelineLocked) {
@@ -54,8 +55,10 @@ public:
       // once xfadeRecord reaches FADE_DURATION_BLOCKS, we are done
       // recording xfade
       if (xfadeBlockCount < FADE_DURATION_BLOCKS) {
-        xfadeOffset = (timeline + xfadeBlockCount) * AUDIO_BLOCK_SAMPLES * 2;
-        ram->write16(address + xfadeOffset, inBlock->data, AUDIO_BLOCK_SAMPLES);
+        if (!isRamOutOfBounds(xfadeBlockCount + 1)) {
+           xfadeOffset = (timeline + xfadeBlockCount) * AUDIO_BLOCK_SAMPLES * 2;
+           ram->write16(address + xfadeOffset, inBlock->data, AUDIO_BLOCK_SAMPLES);
+        }
         xfadeBlockCount++;
       }
       else if (playhead < FADE_DURATION_BLOCKS) {
@@ -81,7 +84,7 @@ public:
         s_in *= gc_record.get(i); // fade in/out gain value
 
         if (isTimelineLocked) { // if we have a base-loop
-          s_in += s_out; // mix in base-loop
+          s_in += (int32_t)(s_out * FEEDBACK_MULTIPLIER); // mix in base-loop with decay
           s_in = SAMPLE_LIMITER(s_in);  // hard limiter
         }
 
@@ -138,7 +141,7 @@ public:
       // STOP RECORDING
       AudioNoInterrupts();
       isTimelineLocked = true;
-      gc_record.mute();
+      gc_record.hardReset(0.0f);
       playhead = 0;
       AudioInterrupts();
     }
@@ -178,6 +181,10 @@ public:
     return xfadeBlockCount >= FADE_DURATION_BLOCKS;
   }
 
+  size_t getMemorySize() {
+    return (timeline + FADE_DURATION_BLOCKS) * AUDIO_BLOCK_SAMPLES * 2;
+  }
+
 private:
   Ram* ram;
   GainControl gc_volume, gc_record, gc_xfade;
@@ -207,6 +214,19 @@ private:
 
     AudioInterrupts();
   }
+
+  bool isRamOutOfBounds(uint32_t extraBlocks) {
+      size_t end_pos_samples = address + (timeline + extraBlocks) * AUDIO_BLOCK_SAMPLES;
+      return end_pos_samples >= TOTAL_SRAM_SAMPLES;
+  }
+
+  // Static scratchpad buffers shared by all Track instances to save RAM/Stack
+  static int16_t tmp_inBlock[AUDIO_BLOCK_SAMPLES];
+  static int16_t tmp_xfadeBlock[AUDIO_BLOCK_SAMPLES];
 };
+
+// Static Member Definitions
+int16_t Track::tmp_inBlock[AUDIO_BLOCK_SAMPLES];
+int16_t Track::tmp_xfadeBlock[AUDIO_BLOCK_SAMPLES];
 
 #endif
