@@ -28,6 +28,7 @@
 #define MS_TO_SAMPLES(x) ((x * SAMPLE_RATE) / 1000)
 #define SAMPLES_TO_MS(x) ((x * 1000) / SAMPLE_RATE)
 #define SAMPLE_LIMITER(x) (x > 32767 ? 32767 : (x < -32768 ? -32768 : x))
+#define BLOCKS_TO_ADDR(x) ((x) * BLOCK_SIZE * 2)
 
 // Fade Settings
 #define FADE_DURATION_BLOCKS 3

@@ -49,20 +49,20 @@ public:
     bool recordActive = !gc_record.isMuted() || !gc_record.isDone();
 
     if (isTimelineLocked) {
-      addrOffset = playhead * AUDIO_BLOCK_SAMPLES * 2;
+      addrOffset = BLOCKS_TO_ADDR(playhead);
 
       // --- Processing CROSS FADE ---
       // once xfadeRecord reaches FADE_DURATION_BLOCKS, we are done
       // recording xfade
       if (xfadeBlockCount < FADE_DURATION_BLOCKS) {
         if (!isRamOutOfBounds(xfadeBlockCount + 1)) {
-           xfadeOffset = (timeline + xfadeBlockCount) * AUDIO_BLOCK_SAMPLES * 2;
+           xfadeOffset = BLOCKS_TO_ADDR(timeline + xfadeBlockCount);
            ram->write16(address + xfadeOffset, inBlock->data, AUDIO_BLOCK_SAMPLES);
         }
         xfadeBlockCount++;
       }
       else if (playhead < FADE_DURATION_BLOCKS) {
-        xfadeOffset = (timeline + playhead) * AUDIO_BLOCK_SAMPLES * 2;
+        xfadeOffset = BLOCKS_TO_ADDR(timeline + playhead);
         ram->read16(address + xfadeOffset, tmp_xfadeBlock, AUDIO_BLOCK_SAMPLES);
       }
       // -----------------------------
@@ -71,7 +71,7 @@ public:
       ram->read16(address + addrOffset, outBlock->data, AUDIO_BLOCK_SAMPLES);
     }
     else {
-      addrOffset = timeline * AUDIO_BLOCK_SAMPLES * 2;
+      addrOffset = BLOCKS_TO_ADDR(timeline);
     }
 
     // --- Individual Sample Processing ---
@@ -113,19 +113,24 @@ public:
     else playhead++;
   }
 
-  /*
-   * Make sure we set address before starting to record!
-   * TODO: Integrate dynamic allocation via Track Static Methods
-   * */
-  void startRecording() { startRecording(0); }
-  void startRecording(size_t n_address) {
-    if (!address) address = n_address;
-    if (!address) return;
+  void startRecording() {
+    // if (!address) address = n_address;
+    // if (!address) return;
+
+    AudioNoInterrupts();
+    if (!address) {
+      if (lock_nextAvailableAddress) return;
+      address = nextAvailableAddress;
+      lock_nextAvailableAddress = true;
+    }
+    AudioInterrupts();
 
     if (!init) { // START RECORDING
+      AudioNoInterrupts();
       hardReset();
       gc_record.unmute();
       init = true;
+      AudioInterrupts();
       return;
     }
 
@@ -134,7 +139,11 @@ public:
     }
   }
 
-  void stopRecording() {
+  /*
+   * If actualBlockLength is used, we trim the timeline to this length
+   * */
+  void stopRecording() { stopRecording(0); }
+  void stopRecording(size_t actualBlockLength) {
     if (!address || !init) return;
 
     if (!isTimelineLocked) {
@@ -143,6 +152,13 @@ public:
       isTimelineLocked = true;
       gc_record.hardReset(0.0f);
       playhead = 0;
+      if (actualBlockLength && actualBlockLength > timeline) {
+        // fill up xfade buffer if we've already recorded it
+        xfadeBlockCount = actualBlockLength - timeline;
+        timeline = actualBlockLength;
+      }
+      nextAvailableAddress += BLOCKS_TO_ADDR(timeline + FADE_DURATION_BLOCKS);
+      lock_nextAvailableAddress = false;
       AudioInterrupts();
     }
     else if (isTimelineLocked && isXfadeComplete && gc_record.isDone()) {
@@ -182,7 +198,7 @@ public:
   }
 
   size_t getMemorySize() {
-    return (timeline + FADE_DURATION_BLOCKS) * AUDIO_BLOCK_SAMPLES * 2;
+    return BLOCKS_TO_ADDR(timeline + FADE_DURATION_BLOCKS);
   }
 
 private:
@@ -221,12 +237,10 @@ private:
   }
 
   // Static scratchpad buffers shared by all Track instances to save RAM/Stack
-  static int16_t tmp_inBlock[AUDIO_BLOCK_SAMPLES];
-  static int16_t tmp_xfadeBlock[AUDIO_BLOCK_SAMPLES];
+  static inline int16_t tmp_inBlock[AUDIO_BLOCK_SAMPLES];
+  static inline int16_t tmp_xfadeBlock[AUDIO_BLOCK_SAMPLES];
+  static inline size_t nextAvailableAddress = 1;
+  static inline bool lock_nextAvailableAddress = false;
 };
-
-// Static Member Definitions
-int16_t Track::tmp_inBlock[AUDIO_BLOCK_SAMPLES];
-int16_t Track::tmp_xfadeBlock[AUDIO_BLOCK_SAMPLES];
 
 #endif
