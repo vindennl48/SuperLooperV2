@@ -157,6 +157,17 @@ public:
     hardReset();
   }
 
+  // FORCE CLEAR: Bypasses state checks to immediately remove track.
+  // MUST be called within AudioNoInterrupt() context.
+  void forceClear() {
+    state = NONE;
+    clear();
+  }
+
+  bool getMuteState() {
+    return muteState;
+  }
+
   bool isXfadeComplete() {
     return xfadeBlockCount >= FADE_DURATION_BLOCKS;
   }

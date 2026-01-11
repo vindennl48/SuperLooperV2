@@ -77,9 +77,7 @@ public:
         break;
 
       case PLAY:
-        if (activeTrackIndex < NUM_LOOPS - 1) {
-          reqState = RECORD;
-        }
+        reqState = RECORD;
         break;
 
       default:
@@ -183,10 +181,20 @@ private:
 
       case PLAY:
         if (reqState == RECORD) {
-          activeTrackIndex++;
-          tracks[activeTrackIndex]->record();
+          // 1. Prune muted tracks
+          while (activeTrackIndex > 0 && tracks[activeTrackIndex]->getMuteState()) {
+            tracks[activeTrackIndex]->forceClear();
+            activeTrackIndex--;
+          }
 
-          state = reqState;
+          // 2. Only transition if we have space (after pruning)
+          if (activeTrackIndex < NUM_LOOPS - 1) {
+            activeTrackIndex++;
+            tracks[activeTrackIndex]->record();
+
+            state = reqState;
+          }
+
           reqState = NONE;
         }
         break;
