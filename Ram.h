@@ -6,6 +6,8 @@
 #include "BALibrary.h"
 #include "Definitions.h"
 
+using namespace BALibrary;
+
 class Ram {
 public:
   Ram() : 

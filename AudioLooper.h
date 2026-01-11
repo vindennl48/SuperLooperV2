@@ -128,9 +128,9 @@ public:
         if (tracks[i]->isStopped()) break;
         delay(10);
       }
-      AudioNoInterrupt();
+      AudioNoInterrupts();
       tracks[i]->clear();
-      AudioInterrupt();
+      AudioInterrupts();
     }
 
     hardReset();
@@ -146,13 +146,13 @@ private:
   int activeTrackIndex;
 
   void hardReset() {
-    AudioNoInterrupt();
+    AudioNoInterrupts();
     state = NONE;
     reqState = NONE;
     playhead = 0; // by blocks
     timeline = 0; // by blocks
     activeTrackIndex = 0;
-    AudioInterrupt();
+    AudioInterrupts();
   }
 
   void updateState() {
@@ -203,6 +203,6 @@ private:
         break;
     }
   }
-
+};
 
 #endif // AUDIO_LOOPER_H
