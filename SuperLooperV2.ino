@@ -251,16 +251,26 @@ const char* getMidiName(byte type) {
   return "Unknown";
 }
 
+// Unified Logic Handler (Logs + Application Triggers)
+void processCommonMidi(byte type, byte channel, byte data1, byte data2, const char* source) {
+  // Log to Serial Monitor
+  LOG("MIDI %s: %s (%d), Ch=%d, D1=%d, D2=%d", source, getMidiName(type), type, channel, data1, data2);
+
+  // Application Logic: CC 1 -> Trigger Looper
+  if ((type & 0xF0) == 0xB0 && data1 == 1) {
+    looper.trigger();
+  }
+}
+
 void handleMidi() {
-  // 1. Process USB MIDI (In -> Log -> Serial Out)
+  // 1. Process USB MIDI
   if (usbMIDI.read()) {
     byte type = usbMIDI.getType();
     byte channel = usbMIDI.getChannel();
     byte data1 = usbMIDI.getData1();
     byte data2 = usbMIDI.getData2();
 
-    // Log to Serial Monitor
-    LOG("MIDI USB: %s (%d), Ch=%d, D1=%d, D2=%d", getMidiName(type), type, channel, data1, data2);
+    processCommonMidi(type, channel, data1, data2, "USB");
 
     // Thru to Hardware MIDI
     if (type < 0xF0) { 
@@ -268,19 +278,18 @@ void handleMidi() {
     }
   }
 
-  // 2. Process Hardware MIDI (In -> Log -> USB Out)
+  // 2. Process Hardware MIDI
   if (MIDI.read()) {
-    midi::MidiType type = MIDI.getType();
+    byte type = (byte)MIDI.getType();
     byte channel = MIDI.getChannel();
     byte data1 = MIDI.getData1();
     byte data2 = MIDI.getData2();
 
-    // Log to Serial Monitor
-    LOG("MIDI Serial: %s (%d), Ch=%d, D1=%d, D2=%d", getMidiName((byte)type), (int)type, channel, data1, data2);
+    processCommonMidi(type, channel, data1, data2, "Serial");
 
     // Thru to USB MIDI
-    if ((byte)type < 0xF0) {
-        usbMIDI.send((byte)type, data1, data2, channel, 0); 
+    if (type < 0xF0) {
+        usbMIDI.send(type, data1, data2, channel, 0); 
     }
   }
 }
