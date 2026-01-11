@@ -112,21 +112,17 @@ void setup() {
 // Main Loop
 // -------------------------------------------------------------------------
 void loop() {
-    // 1. Poll Looper (Critical for SD operations)
-    // This moves data between RAM and SD Card
-    looper.poll();
-
-    // 2. Handle Inputs
+    // 1. Handle Inputs
     // Update Potentiometer (Handles Soft Takeover)
     pot1.update();
     // if (pot1.changed()) LOG("Pot1 Value: %.2f", pot1.getValue());
     
-    // Update Looper Mute State based on Pot
-    looper.updateMuteState(pot1.getValue());
+    // Update Smart Mute State based on Pot
+    looper.updateSmartMute(pot1.getValue());
 
     handleFootswitch();
     
-    // 3. Update Feedback
+    // 2. Update Feedback
     handleLed();
 }
 
@@ -135,32 +131,18 @@ void handleFootswitch() {
     fs2.update();
 
     if (fs1.pressed()) {
-        // Check if we are currently in a "Branching" state (overwriting existing tracks)
-        // vs simply appending a new track at the end.
-        // We capture this BEFORE triggering because trigger() might reset the counts.
-        bool isBranching = !looper.isAtEndOfList();
+        // Detect if we are about to start a NEW recording (Branching/Layering)
+        // This happens if we are currently PLAYING and haven't reached max tracks yet.
+        // Triggering now will switch us to RECORD state for the next track.
+        bool startingNewLayer = looper.isPlaying() && !looper.isMaxTracksReached();
 
-        AudioLooper::LooperState oldState = looper.getState();
+        if (startingNewLayer) {
+            // Force pot to 1.0 so the new layer is immediately audible
+            pot1.setInitialValue(1.0f);
+            LOG("System: New Layer Started -> Pot Unlocked to 1.0");
+        }
         
         looper.trigger();
-        
-        AudioLooper::LooperState newState = looper.getState();
-        
-        // Detect if we just started a new recording session or track
-        bool startedRecording = (oldState != AudioLooper::RECORDING && oldState != AudioLooper::WAITING_TO_RECORD) &&
-                                (newState == AudioLooper::RECORDING || newState == AudioLooper::WAITING_TO_RECORD);
-
-        if (startedRecording) {
-            // Simplified Logic:
-            // If we are recording over existing tracks (Branching), we MUST have muted them via the pot.
-            // In this case, we always unlock to 1.0 to ensure the new recording is audible.
-            // If we are just appending to the end, we trust the user's current pot setting (unless they mute the new track, 
-            // but the user requested simplicity here).
-            if (isBranching) {
-                pot1.setInitialValue(1.0f);
-                LOG("System: Branching Record Started -> Pot Unlocked to 1.0");
-            }
-        }
     }
     
     if (fs2.pressed()) {
@@ -171,19 +153,19 @@ void handleFootswitch() {
 void handleLed() {
     led1.update();
 
-    // Simple state feedback
-    switch (looper.getState()) {
-        case AudioLooper::IDLE:
-            led1.off();
-            break;
-        case AudioLooper::RECORDING:
-        case AudioLooper::PLAYBACK:
-        case AudioLooper::FULL_PLAYBACK:
-            led1.on(); 
-            break;
-        case AudioLooper::WAITING_TO_RECORD:
-        case AudioLooper::WAITING_TO_FINISH:
-            led1.blink(250);
-            break;
+    // Blink if waiting for a state change (Quantized start/stop)
+    if (looper.isWaiting()) {
+        led1.blink(250);
+        return;
+    }
+
+    // Solid state feedback
+    if (looper.isIdle()) {
+        led1.off();
+    } else if (looper.isRecording() || looper.isPlaying()) {
+        led1.on();
+    } else {
+        // Fallback (e.g. stopped but not idle, though currently reset handles that)
+        led1.off();
     }
 }
