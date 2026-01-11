@@ -3,6 +3,7 @@
 #include <Wire.h>
 #include <SD.h>
 #include <SerialFlash.h>
+#include <MIDI.h>
 #include "BALibrary.h"
 #include "Definitions.h"
 #include "AudioLooper.h"
@@ -60,8 +61,12 @@ AudioConnection      patchUsb1(outputMixer, 0, usbOut, 1);
 // -------------------------------------------------------------------------
 // Forward Declarations
 // -------------------------------------------------------------------------
+void handlePot();
 void handleFootswitch();
 void handleLed();
+void handleMidi();
+
+MIDI_CREATE_INSTANCE(HardwareSerial, Serial1, MIDI);
 
 // -------------------------------------------------------------------------
 // Setup
@@ -86,6 +91,9 @@ void setup() {
     
   // Initialize Looper (Allocates Memory/SD structures)
   looper.begin();
+
+  // MIDI Setup
+  MIDI.begin(MIDI_CHANNEL_OMNI);
 
 #if DEBUG_MODE
   // --- RAM TEST ---
@@ -158,6 +166,7 @@ void loop() {
   handlePot();
   handleFootswitch();
   handleLed();
+  handleMidi();
 }
 
 void handlePot() {
@@ -205,5 +214,73 @@ void handleLed() {
   } else {
     // Fallback (e.g. stopped but not idle, though currently reset handles that)
     led1.off();
+  }
+}
+
+// -------------------------------------------------------------------------
+// MIDI Handling
+// -------------------------------------------------------------------------
+
+const char* getMidiName(byte type) {
+  // Mask off channel for voice messages (0x80 - 0xEF)
+  if (type >= 0x80 && type < 0xF0) {
+    switch (type & 0xF0) {
+      case 0x80: return "NoteOff";
+      case 0x90: return "NoteOn";
+      case 0xA0: return "PolyKeyPressure";
+      case 0xB0: return "ControlChange";
+      case 0xC0: return "ProgramChange";
+      case 0xD0: return "ChannelPressure";
+      case 0xE0: return "PitchBend";
+    }
+  }
+  // System Messages
+  switch (type) {
+    case 0xF0: return "SysEx";
+    case 0xF1: return "TimeCode";
+    case 0xF2: return "SongPos";
+    case 0xF3: return "SongSel";
+    case 0xF6: return "TuneRequest";
+    case 0xF8: return "Clock";
+    case 0xFA: return "Start";
+    case 0xFB: return "Continue";
+    case 0xFC: return "Stop";
+    case 0xFE: return "ActiveSensing";
+    case 0xFF: return "SystemReset";
+  }
+  return "Unknown";
+}
+
+void handleMidi() {
+  // 1. Process USB MIDI (In -> Log -> Serial Out)
+  if (usbMIDI.read()) {
+    byte type = usbMIDI.getType();
+    byte channel = usbMIDI.getChannel();
+    byte data1 = usbMIDI.getData1();
+    byte data2 = usbMIDI.getData2();
+
+    // Log to Serial Monitor
+    LOG("MIDI USB: %s (%d), Ch=%d, D1=%d, D2=%d", getMidiName(type), type, channel, data1, data2);
+
+    // Thru to Hardware MIDI
+    if (type < 0xF0) { 
+        MIDI.send((midi::MidiType)type, data1, data2, channel);
+    }
+  }
+
+  // 2. Process Hardware MIDI (In -> Log -> USB Out)
+  if (MIDI.read()) {
+    midi::MidiType type = MIDI.getType();
+    byte channel = MIDI.getChannel();
+    byte data1 = MIDI.getData1();
+    byte data2 = MIDI.getData2();
+
+    // Log to Serial Monitor
+    LOG("MIDI Serial: %s (%d), Ch=%d, D1=%d, D2=%d", getMidiName((byte)type), (int)type, channel, data1, data2);
+
+    // Thru to USB MIDI
+    if ((byte)type < 0xF0) {
+        usbMIDI.send((byte)type, data1, data2, channel, 0); 
+    }
   }
 }
