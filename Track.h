@@ -35,6 +35,7 @@ public:
     switch (state) {
       case RECORD: {
         size_t addrOffset = address + BLOCKS_TO_ADDR(timeline);
+        int16_t buffer[AUDIO_BLOCK_SAMPLES];
 
         // Debug: Log start of recording
         if (timeline == 0) {
@@ -42,9 +43,9 @@ public:
         }
 
         for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
-          int16_t s_in = inBlock->data[i] * gc_record.get(i);
-          ram->write16(addrOffset + i, s_in);
+          buffer[i] = inBlock->data[i] * gc_record.get(i);
         }
+        ram->write16(addrOffset, buffer, AUDIO_BLOCK_SAMPLES);
 
         timeline++;
         break;
@@ -54,6 +55,8 @@ public:
       case PLAY: {
         size_t addrOffset = address + BLOCKS_TO_ADDR(playhead);
         size_t xfadeOffset = address + BLOCKS_TO_ADDR(timeline + playhead);
+        int16_t buffer[AUDIO_BLOCK_SAMPLES];
+        int16_t xfadeBuffer[AUDIO_BLOCK_SAMPLES];
         
         bool recordXfade = xfadeBlockCount < FADE_DURATION_BLOCKS;
         bool processXfade = !recordXfade && playhead < FADE_DURATION_BLOCKS;
@@ -65,28 +68,32 @@ public:
 
         ram->read16(addrOffset, outBlock->data, AUDIO_BLOCK_SAMPLES);
 
+        if (recordXfade)
+          ram->write16(xfadeOffset, inBlock->data, AUDIO_BLOCK_SAMPLES);
+        else if (processXfade)
+          ram->read16(xfadeOffset, xfadeBuffer, AUDIO_BLOCK_SAMPLES);
+
         for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
           int32_t s_in = inBlock->data[i];
           int32_t s_out = outBlock->data[i];
 
-          if (recordXfade) {
-            ram->write16(xfadeOffset + i, s_in);
-          }
-          else if (processXfade) {
-            int32_t s_xfade = ram->read16(xfadeOffset + i);
-            s_out += s_xfade * gc_xfade.get(i);
-          }
+          // if processXfade add xfadeBuffer to s_out
+          if (processXfade) s_out += xfadeBuffer[i] * gc_xfade.get(i);
 
           if (state == OVERDUB) {
             s_in *= gc_record.get(i);
             s_in += s_out;
             s_in *= FEEDBACK_MULTIPLIER;
-            ram->write16(addrOffset + i, (int16_t)s_in);
+            buffer[i] = (int16_t)s_in;
           }
 
           s_out *= gc_volume.get(i);
           s_out = SAMPLE_LIMITER(s_out);
           outBlock->data[i] = (int16_t)s_out;
+        }
+
+        if (state == OVERDUB) {
+          ram->write16(addrOffset, buffer, AUDIO_BLOCK_SAMPLES);
         }
 
         if (recordXfade) xfadeBlockCount++;
