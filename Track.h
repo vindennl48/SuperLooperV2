@@ -122,6 +122,14 @@ public:
     return muteState && gc_volume.isMuteDone();
   }
 
+  bool isStopped() {
+    return state == STOP;
+  }
+
+  bool isNone() {
+    return state == NONE;
+  }
+
   State getState() {
     return state;
   }
@@ -138,7 +146,7 @@ public:
     // Only clear if this is the most recently allocated track
     if (allocationId != activeAllocationCount) return;
 
-    if (state != STOP && state != NONE) return;
+    if (!isStopped() && !isNone()) return;
 
     // Reclaim memory
     nextAvailableAddress = address;

@@ -7,6 +7,13 @@
 
 class AudioLooper : public AudioStream {
 public:
+  enum State {
+    NONE,
+    RECORD,
+    PLAY,
+    STOP
+  };
+
   AudioLooper(void) : AudioStream(1, inputQueueArray) {
     for (int i = 0; i < NUM_LOOPS; i++) {
       tracks[i] = new Track(&ram);
@@ -18,7 +25,25 @@ public:
     ram.begin();
   }
 
-  void trigger() { // when footswitch is pressed
+  void trigger() {
+    switch (state) {
+      case NONE:
+        reqState = RECORD;
+        break;
+      
+      case RECORD:
+        reqState = PLAY;
+        break;
+
+      case PLAY:
+        if (activeTrackIndex < NUM_LOOPS - 1) {
+          reqState = RECORD;
+        }
+        break;
+
+      default:
+        break;
+    }
   }
 
   virtual void update(void) {
@@ -31,12 +56,25 @@ public:
     }
     if (!inBlock) return;
 
+    updateState();
+
     // zero out the output block
     memset(outBlock->data, 0, sizeof(outBlock->data));
 
+    // Check if base loop just finished recording to set global timeline
+    if (activeTrackIndex == 0 && timeline == 0) {
+      if (tracks[0]->getState() == Track::PLAY) {
+        timeline = tracks[0]->getTimelineLength();
+      }
+    }
+
+    if (timeline > 0) {
+      playhead++;
+      if (playhead >= timeline) playhead = 0;
+    }
+
     for (size_t i = 0; i < NUM_LOOPS; i++) {
-      Track& track = tracks[i];
-      track.update(inBlock, outBlock);
+      tracks[i]->update(inBlock, outBlock);
     }
 
     transmit(outBlock, 0);
@@ -46,13 +84,12 @@ public:
 
   void reset() {
     for (int i = NUM_LOOPS-1; i >= 0; i--) {
-      Track& track = tracks[i];
-      track.stop(true);
+      tracks[i]->stop();
       for (int j = 0; j < 100; j++) {
-        if (track.isStopped()) break;
+        if (tracks[i]->isStopped()) break;
         delay(10);
       }
-      track.clear();
+      tracks[i]->clear();
     }
 
     hardReset();
@@ -65,21 +102,51 @@ private:
 
   size_t playhead; // by blocks
   size_t timeline; // by blocks
+  
+  volatile State state;
+  volatile State reqState;
+  int activeTrackIndex;
 
   void hardReset() {
     playhead = 0; // by blocks
     timeline = 0; // by blocks
+    state = NONE;
+    reqState = NONE;
+    activeTrackIndex = 0;
   }
 
   void updateState() {
     switch (state) {
       case NONE:
+        if (reqState == RECORD) {
+          state = RECORD;
+          activeTrackIndex = 0;
+          tracks[activeTrackIndex]->record();
+          reqState = NONE;
+        }
+        break;
+      
+      case RECORD:
+        if (reqState == PLAY) {
+          state = PLAY;
+          tracks[activeTrackIndex]->play();
+          reqState = NONE;
+        }
+        break;
+
+      case PLAY:
+        if (reqState == RECORD) {
+          state = RECORD;
+          activeTrackIndex++;
+          tracks[activeTrackIndex]->record();
+          reqState = NONE;
+        }
         break;
 
       default:
         break;
     }
   }
-};
+
 
 #endif // AUDIO_LOOPER_H
