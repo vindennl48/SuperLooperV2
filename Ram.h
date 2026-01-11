@@ -99,67 +99,75 @@ public:
   // --- 16-bit Access ---
 
   void write16(size_t address, int16_t data) {
-    // Address for 16-bit writes is usually in bytes, but let's assume the user passes a byte address.
-    // However, BASpiMemory::write16 takes an address. Let's assume it's a byte address.
-    if (address < mem0Size) {
-      mem0.write16(address, (uint16_t)data);
-    } else if (address < totalSize) {
-      mem1.write16(address - mem0Size, (uint16_t)data);
+    // Address is now a WORD index (sample number)
+    size_t byteAddress = address * 2;
+    
+    if (byteAddress < mem0Size) {
+      mem0.write16(byteAddress, (uint16_t)data);
+    } else if (byteAddress < totalSize) {
+      mem1.write16(byteAddress - mem0Size, (uint16_t)data);
     }
   }
 
   int16_t read16(size_t address) {
+    // Address is now a WORD index (sample number)
+    size_t byteAddress = address * 2;
     int16_t retVal = 0;
-    if (address < mem0Size) {
-      retVal = (int16_t)mem0.read16(address);
-    } else if (address < totalSize) {
-      retVal = (int16_t)mem1.read16(address - mem0Size);
+    
+    if (byteAddress < mem0Size) {
+      retVal = (int16_t)mem0.read16(byteAddress);
+    } else if (byteAddress < totalSize) {
+      retVal = (int16_t)mem1.read16(byteAddress - mem0Size);
     }
     return retVal;
   }
 
   void write16(size_t address, int16_t *data, size_t length) {
-    // Length is in WORDS (16-bit)
-    if (address >= totalSize) return;
+    // Address and Length are in WORDS (16-bit)
+    size_t mem0SizeWords = mem0Size / 2;
+    size_t totalSizeWords = totalSize / 2;
 
-    if (address < mem0Size) {
-      size_t availableInMem0Bytes = mem0Size - address;
-      size_t availableInMem0Words = availableInMem0Bytes / 2;
+    if (address >= totalSizeWords) return;
+
+    if (address < mem0SizeWords) {
+      size_t availableInMem0Words = mem0SizeWords - address;
 
       if (length <= availableInMem0Words) {
-        mem0.write16(address, (uint16_t*)data, length);
+        mem0.write16(address * 2, (uint16_t*)data, length);
       } else {
-        mem0.write16(address, (uint16_t*)data, availableInMem0Words);
+        mem0.write16(address * 2, (uint16_t*)data, availableInMem0Words);
         size_t remainingWords = length - availableInMem0Words;
         // Check bounds for MEM1
-        size_t mem1SizeWords = (totalSize - mem0Size) / 2;
+        size_t mem1SizeWords = totalSizeWords - mem0SizeWords;
         if (remainingWords > mem1SizeWords) remainingWords = mem1SizeWords;
         mem1.write16(0, (uint16_t*)(data + availableInMem0Words), remainingWords);
       }
     } else {
-      mem1.write16(address - mem0Size, (uint16_t*)data, length);
+      mem1.write16((address - mem0SizeWords) * 2, (uint16_t*)data, length);
     }
   }
 
   void read16(size_t address, int16_t *dest, size_t length) {
-    // Length is in WORDS
-    if (address >= totalSize) return;
+    // Address and Length are in WORDS
+    size_t mem0SizeWords = mem0Size / 2;
+    size_t totalSizeWords = totalSize / 2;
 
-    if (address < mem0Size) {
-      size_t availableInMem0Bytes = mem0Size - address;
-      size_t availableInMem0Words = availableInMem0Bytes / 2;
+    if (address >= totalSizeWords) return;
+
+    if (address < mem0SizeWords) {
+      size_t availableInMem0Words = mem0SizeWords - address;
 
       if (length <= availableInMem0Words) {
-        mem0.read16(address, (uint16_t*)dest, length);
+        mem0.read16(address * 2, (uint16_t*)dest, length);
       } else {
-        mem0.read16(address, (uint16_t*)dest, availableInMem0Words);
+        mem0.read16(address * 2, (uint16_t*)dest, availableInMem0Words);
         size_t remainingWords = length - availableInMem0Words;
-        size_t mem1SizeWords = (totalSize - mem0Size) / 2;
+        size_t mem1SizeWords = totalSizeWords - mem0SizeWords;
         if (remainingWords > mem1SizeWords) remainingWords = mem1SizeWords;
         mem1.read16(0, (uint16_t*)(dest + availableInMem0Words), remainingWords);
       }
     } else {
-      mem1.read16(address - mem0Size, (uint16_t*)dest, length);
+      mem1.read16((address - mem0SizeWords) * 2, (uint16_t*)dest, length);
     }
   }
 

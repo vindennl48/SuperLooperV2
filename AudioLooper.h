@@ -15,7 +15,7 @@ public:
   }
 
   void begin() {
-    ram.begin()
+    ram.begin();
   }
 
   void trigger() { // when footswitch is pressed

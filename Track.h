@@ -32,13 +32,11 @@ public:
 
     switch (state) {
       case RECORD: {
-        // Fix: address is bytes, timeline is blocks. 
-        // Convert timeline to bytes, then add to base address.
         size_t addrOffset = address + BLOCKS_TO_ADDR(timeline);
 
         for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
           int16_t s_in = inBlock->data[i] * gc_record.get(i);
-          ram->write16(addrOffset + (i * 2), s_in);
+          ram->write16(addrOffset + i, s_in);
         }
 
         timeline++;
@@ -65,10 +63,10 @@ public:
           int32_t s_out = outBlock->data[i];
 
           if (recordXfade) {
-            ram->write16(xfadeOffset + (i * 2), s_in);
+            ram->write16(xfadeOffset + i, s_in);
           }
           else if (processXfade) {
-            int32_t s_xfade = ram->read16(xfadeOffset + (i * 2));
+            int32_t s_xfade = ram->read16(xfadeOffset + i);
             s_out += s_xfade * gc_xfade.get(i);
           }
 
@@ -76,7 +74,7 @@ public:
             s_in *= gc_record.get(i);
             s_in += s_out;
             s_in *= FEEDBACK_MULTIPLIER;
-            ram->write16(addrOffset + (i * 2), (int16_t)s_in);
+            ram->write16(addrOffset + i, (int16_t)s_in);
           }
 
           s_out *= gc_volume.get(i);
@@ -196,8 +194,8 @@ private:
   }
 
   bool isRamOutOfBounds(uint32_t extraBlocks) {
-      size_t end_pos_bytes = address + BLOCKS_TO_ADDR(timeline + extraBlocks);
-      return end_pos_bytes >= SAMPLES_TO_BYTES(TOTAL_SRAM_SAMPLES);
+      size_t end_pos_words = address + BLOCKS_TO_ADDR(timeline + extraBlocks);
+      return end_pos_words >= TOTAL_SRAM_SAMPLES;
   }
 
   void updateState() {
