@@ -32,11 +32,13 @@ public:
 
     switch (state) {
       case RECORD: {
-        size_t addrOffset = BLOCKS_TO_ADDR(address + timeline);
+        // Fix: address is bytes, timeline is blocks. 
+        // Convert timeline to bytes, then add to base address.
+        size_t addrOffset = address + BLOCKS_TO_ADDR(timeline);
 
         for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
           int16_t s_in = inBlock->data[i] * gc_record.get(i);
-          ram->write16(addrOffset + i, s_in);
+          ram->write16(addrOffset + (i * 2), s_in);
         }
 
         timeline++;
@@ -45,8 +47,9 @@ public:
 
       case OVERDUB:
       case PLAY: {
-        size_t addrOffset = BLOCKS_TO_ADDR(address + playhead);
-        size_t xfadeOffset = BLOCKS_TO_ADDR(address + timeline + playhead);
+        size_t addrOffset = address + BLOCKS_TO_ADDR(playhead);
+        size_t xfadeOffset = address + BLOCKS_TO_ADDR(timeline + playhead);
+        
         bool recordXfade = xfadeBlockCount < FADE_DURATION_BLOCKS;
         bool processXfade = !recordXfade && playhead < FADE_DURATION_BLOCKS;
 
@@ -62,11 +65,10 @@ public:
           int32_t s_out = outBlock->data[i];
 
           if (recordXfade) {
-            int16_t s_xfade = s_in * gc_xfade.get(i);
-            ram->write16(xfadeOffset + i, s_xfade);
+            ram->write16(xfadeOffset + (i * 2), s_in);
           }
           else if (processXfade) {
-            int32_t s_xfade; ram->read16(xfadeOffset + i, s_xfade);
+            int32_t s_xfade = ram->read16(xfadeOffset + (i * 2));
             s_out += s_xfade * gc_xfade.get(i);
           }
 
@@ -74,7 +76,7 @@ public:
             s_in *= gc_record.get(i);
             s_in += s_out;
             s_in *= FEEDBACK_MULTIPLIER;
-            ram->write16(addrOffset + i, (int16_t)s_in);
+            ram->write16(addrOffset + (i * 2), (int16_t)s_in);
           }
 
           s_out *= gc_volume.get(i);
@@ -108,18 +110,18 @@ public:
   }
 
   void mute(bool willMute) {
-    mute = willMute;
+    muteState = willMute;
     gc_volume.mute(willMute);
   }
 
   void toggleMute() {
-    if (mute) mute = false;
-    else mute = true;
-    gc_volume.mute(mute);
+    if (muteState) muteState = false;
+    else muteState = true;
+    gc_volume.mute(muteState);
   }
 
   bool isMuted() {
-    return mute && gc_volume.isMuteDone();
+    return muteState && gc_volume.isMuteDone();
   }
 
   State getState() {
@@ -130,6 +132,9 @@ public:
     gc_volume.setGain(n_volume);
   }
 
+  // NOTE: This function modifies shared static memory counters.
+  // The user MUST include an AudioNoInterrupt wrapper around this function
+  // (or the caller) to prevent race conditions with the audio update interrupt.
   void clear() {
     // STRICT LIFO CHECK
     // Only clear if this is the most recently allocated track
@@ -153,13 +158,13 @@ public:
   size_t getTimelineLength() { return timeline; }
 
 private:
-  static inline size_t nextAvailableAddress = 1;
+  static inline size_t nextAvailableAddress = 1; // should be 1, leave 0 empty
   static inline bool lock_nextAvailableAddress = false;
   static inline int activeAllocationCount = 0;
 
   Ram* ram;
   int allocationId;
-  State state, nextState, reqState;
+  volatile State state, nextState, reqState;
   GainControl gc_volume, gc_record, gc_xfade;
 
   size_t address; // start pos in ram
@@ -167,8 +172,8 @@ private:
   size_t timeline;  // length of playable loop in audio blocks
   uint16_t xfadeBlockCount;  // block pos for crossfade samples
   size_t actualBlockLength;
-  bool trim;
-  bool mute;
+  volatile bool trim;
+  volatile bool muteState;
 
   void hardReset() {
     // allocationId = 0; // only reset from clear()
@@ -187,12 +192,12 @@ private:
     xfadeBlockCount = 0;
     actualBlockLength = 0;
     trim = false;
-    mute = false;
+    muteState = false;
   }
 
   bool isRamOutOfBounds(uint32_t extraBlocks) {
-      size_t end_pos_samples = address + (timeline + extraBlocks) * AUDIO_BLOCK_SAMPLES;
-      return end_pos_samples >= TOTAL_SRAM_SAMPLES;
+      size_t end_pos_bytes = address + BLOCKS_TO_ADDR(timeline + extraBlocks);
+      return end_pos_bytes >= SAMPLES_TO_BYTES(TOTAL_SRAM_SAMPLES);
   }
 
   void updateState() {
@@ -279,7 +284,7 @@ private:
 
       case STOP:
         if (reqState == PLAY) {
-          if (!mute) gc_volume.unmute();
+          if (!muteState) gc_volume.unmute();
 
           state = reqState;
           nextState = NONE;
