@@ -35,6 +35,7 @@ BAAudioControlWM8731 codecControl;
 AudioInputI2S        i2sIn;
 AudioInputUSB        usbIn;       // USB Audio Input
 AudioMixer4          inputMixer;  // Mixer for Hardware + USB
+AudioMixer4          outputMixer; // Mixer for Dry + Wet
 AudioOutputI2S       i2sOut;
 AudioOutputUSB       usbOut;      // USB Audio Output
 AudioLooper          looper; 
@@ -46,11 +47,15 @@ AudioConnection      patchMix1(usbIn, 0, inputMixer, 1);
 // 2. Route Mix -> Looper
 AudioConnection      patchLoopIn(inputMixer, 0, looper, 0);
 
-// 3. Route Looper Output -> Hardware & USB
-AudioConnection      patchOut0(looper, 0, i2sOut, 0);
-AudioConnection      patchOut1(looper, 0, i2sOut, 1); // Mono out to both channels
-AudioConnection      patchUsb0(looper, 0, usbOut, 0);
-AudioConnection      patchUsb1(looper, 0, usbOut, 1);
+// 3. Route Signals -> Output Mixer
+AudioConnection      patchLoopOut(looper, 0, outputMixer, 0); // Wet (Looper)
+AudioConnection      patchDryOut(inputMixer, 0, outputMixer, 1); // Dry (Thru)
+
+// 4. Route Output Mixer -> Hardware & USB
+AudioConnection      patchOut0(outputMixer, 0, i2sOut, 0);
+AudioConnection      patchOut1(outputMixer, 0, i2sOut, 1); // Mono out to both channels
+AudioConnection      patchUsb0(outputMixer, 0, usbOut, 0);
+AudioConnection      patchUsb1(outputMixer, 0, usbOut, 1);
 
 // -------------------------------------------------------------------------
 // Forward Declarations
@@ -87,6 +92,11 @@ void setup() {
     inputMixer.gain(1, 1.0f); // USB Input
     inputMixer.gain(2, 0.0f);
     inputMixer.gain(3, 0.0f);
+
+    outputMixer.gain(0, 1.0f); // Wet
+    outputMixer.gain(1, 1.0f); // Dry
+    outputMixer.gain(2, 0.0f);
+    outputMixer.gain(3, 0.0f);
 
     // Enable Codec
     codecControl.disable();

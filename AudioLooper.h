@@ -67,17 +67,21 @@ public:
   }
 
   void trigger() {
+    LOG("AudioLooper::trigger() called. Current State: %d", state);
     switch (state) {
       case NONE:
         reqState = RECORD;
+        LOG("AudioLooper::trigger() -> Requesting RECORD");
         break;
       
       case RECORD:
         reqState = PLAY;
+        LOG("AudioLooper::trigger() -> Requesting PLAY");
         break;
 
       case PLAY:
         reqState = RECORD;
+        LOG("AudioLooper::trigger() -> Requesting RECORD (New Layer)");
         break;
 
       default:
@@ -104,12 +108,16 @@ public:
     if (activeTrackIndex == 0 && timeline == 0) {
       if (tracks[0]->getState() == Track::PLAY) {
         timeline = tracks[0]->getTimelineLength();
+        LOG("AudioLooper -> Global Timeline Set: %d blocks", timeline);
       }
     }
 
     if (timeline > 0) {
       playhead++;
-      if (playhead >= timeline) playhead = 0;
+      if (playhead >= timeline) {
+        playhead = 0;
+        // LOG("AudioLooper -> Loop Wrap"); // Commented out to avoid spam, uncomment if needed
+      }
     }
 
     for (size_t i = 0; i < NUM_LOOPS; i++) {
@@ -146,6 +154,7 @@ private:
   int activeTrackIndex;
 
   void hardReset() {
+    LOG("AudioLooper::hardReset() called");
     AudioNoInterrupts();
     state = NONE;
     reqState = NONE;
@@ -163,6 +172,7 @@ private:
       case NONE:
         if (reqState == RECORD) {
           activeTrackIndex = 0;
+          LOG("AudioLooper::updateState() -> Starting Recording on Track %d", activeTrackIndex);
           tracks[activeTrackIndex]->record();
 
           state = reqState;
@@ -172,6 +182,7 @@ private:
       
       case RECORD:
         if (reqState == PLAY) {
+          LOG("AudioLooper::updateState() -> Stopping Recording, Starting Playback on Track %d", activeTrackIndex);
           tracks[activeTrackIndex]->play();
 
           state = reqState;
@@ -183,6 +194,7 @@ private:
         if (reqState == RECORD) {
           // 1. Prune muted tracks
           while (activeTrackIndex > 0 && tracks[activeTrackIndex]->getMuteState()) {
+            LOG("AudioLooper::updateState() -> Pruning Muted Track %d", activeTrackIndex);
             tracks[activeTrackIndex]->forceClear();
             activeTrackIndex--;
           }
@@ -190,9 +202,12 @@ private:
           // 2. Only transition if we have space (after pruning)
           if (activeTrackIndex < NUM_LOOPS - 1) {
             activeTrackIndex++;
+            LOG("AudioLooper::updateState() -> Starting New Layer Recording on Track %d", activeTrackIndex);
             tracks[activeTrackIndex]->record();
 
             state = reqState;
+          } else {
+             LOG("AudioLooper::updateState() -> Max Tracks Reached (%d). Cannot Record New Layer.", activeTrackIndex);
           }
 
           reqState = NONE;

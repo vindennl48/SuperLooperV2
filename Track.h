@@ -18,6 +18,8 @@ public:
 
   Track(Ram* ram) : ram(ram)
   {
+    allocationId = 0;
+    address = 0;
     hardReset();
   }
   ~Track() {}
@@ -33,6 +35,11 @@ public:
     switch (state) {
       case RECORD: {
         size_t addrOffset = address + BLOCKS_TO_ADDR(timeline);
+
+        // Debug: Log start of recording
+        if (timeline == 0) {
+             LOG("Track::update() -> Recording started at RAM Addr: %d", addrOffset);
+        }
 
         for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
           int16_t s_in = inBlock->data[i] * gc_record.get(i);
@@ -236,6 +243,7 @@ private:
 
           gc_record.fadeIn();
 
+          LOG("Track::updateState() -> NONE to RECORD. Address: %d", address);
           state = RECORD;
           nextState = NONE;
           reqState = NONE;
@@ -243,7 +251,10 @@ private:
         break;
 
       case RECORD:
-        if (isRamOutOfBounds(1)) reqState = PLAY; // RAM Bounds Check
+        if (isRamOutOfBounds(1)) {
+           LOG("Track::updateState() -> RECORD to PLAY (RAM Full)");
+           reqState = PLAY; // RAM Bounds Check
+        }
 
         if (reqState == PLAY) {
           gc_record.hardReset(0.0f);
@@ -257,6 +268,7 @@ private:
           nextAvailableAddress += BLOCKS_TO_ADDR(timeline + FADE_DURATION_BLOCKS);
           lock_nextAvailableAddress = false;
 
+          LOG("Track::updateState() -> RECORD to PLAY. Timeline: %d blocks", timeline);
           state = reqState;
           nextState = NONE;
           reqState = NONE;
@@ -267,6 +279,7 @@ private:
         if (reqState == OVERDUB) {
           gc_record.fadeIn();
 
+          LOG("Track::updateState() -> PLAY to OVERDUB");
           state = reqState;
           nextState = NONE;
           reqState = NONE;
@@ -279,6 +292,7 @@ private:
           reqState = NONE;
         }
         if (nextState == STOP && gc_volume.isDone()) {
+          LOG("Track::updateState() -> PLAY to STOP");
           state = nextState;
           nextState = NONE;
           reqState = NONE;
@@ -293,6 +307,7 @@ private:
           reqState = NONE;
         }
         if (nextState == PLAY && gc_record.isDone()) {
+          LOG("Track::updateState() -> OVERDUB to PLAY");
           state = nextState;
           nextState = NONE;
           reqState = NONE;
@@ -303,6 +318,7 @@ private:
         if (reqState == PLAY) {
           if (!muteState) gc_volume.unmute();
 
+          LOG("Track::updateState() -> STOP to PLAY");
           state = reqState;
           nextState = NONE;
           reqState = NONE;
