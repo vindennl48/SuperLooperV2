@@ -67,151 +67,141 @@ void handleLed();
 // Setup
 // -------------------------------------------------------------------------
 void setup() {
-    Serial.begin(9600);
-    delay(200); // Allow Serial to initialize
+  Serial.begin(9600);
+  delay(200); // Allow Serial to initialize
 
-    LOG("Starting SuperLooperV2...");
+  LOG("Starting SuperLooperV2...");
 
-    // Initialize BALibrary hardware for TGA Pro MKII Rev 1
-    TGA_PRO_MKII_REV1();
+  // Initialize BALibrary hardware for TGA Pro MKII Rev 1
+  TGA_PRO_MKII_REV1();
     
-    // Initialize External SPI Memory Chips
-    SPI_MEM0_64M();
-    SPI_MEM1_64M();
+  // Initialize External SPI Memory Chips
+  SPI_MEM0_64M();
+  SPI_MEM1_64M();
 
-    // Allocate Audio Memory
-    // 128 blocks is generally sufficient for standard audio path,
-    // but the RingBuffers in MemoryRam manage their own external memory.
-    AudioMemory(BLOCK_SIZE);
+  // Allocate Audio Memory
+  // 128 blocks is generally sufficient for standard audio path,
+  // but the RingBuffers in MemoryRam manage their own external memory.
+  AudioMemory(BLOCK_SIZE);
     
-    // Initialize Looper (Allocates Memory/SD structures)
-    looper.begin();
+  // Initialize Looper (Allocates Memory/SD structures)
+  looper.begin();
 
-    // --- RAM TEST ---
-    LOG("--- Performing RAM Self-Test ---");
-    int16_t testPattern[128];
-    int16_t readBack[128];
-    for(int i=0; i<128; i++) testPattern[i] = (int16_t)(i * 100);
+  // --- RAM TEST ---
+  LOG("--- Performing RAM Self-Test ---");
+  int16_t testPattern[128];
+  int16_t readBack[128];
+  for(int i=0; i<128; i++) testPattern[i] = (int16_t)(i * 100);
     
-    // Write to address 0 (using the looper's internal ram object would be ideal, 
-    // but since it's private, we will rely on the fact that Ram works if this works.
-    // Actually, we can't access looper.ram directly. 
-    // We will assume the Ram class works if we instantiate a temporary one or 
-    // just trust the rest of the code if the issue is logic.
-    // Wait, we can't verify looper.ram easily without exposing it.
-    // Let's Skip the explicit object test and trust the logic fix first.
-    // ACTUALLY, let's create a temporary Ram object just to test the bus.
-    Ram testRam;
-    testRam.begin();
-    testRam.write16(0, testPattern, 128);
-    testRam.read16(0, readBack, 128);
+  // Write to address 0 (using the looper's internal ram object would be ideal, 
+  // but since it's private, we will rely on the fact that Ram works if this works.
+  // Actually, we can't access looper.ram directly. 
+  // We will assume the Ram class works if we instantiate a temporary one or 
+  // just trust the rest of the code if the issue is logic.
+  // Wait, we can't verify looper.ram easily without exposing it.
+  // Let's Skip the explicit object test and trust the logic fix first.
+  // ACTUALLY, let's create a temporary Ram object just to test the bus.
+  Ram testRam;
+  testRam.begin();
+  testRam.write16(0, testPattern, 128);
+  testRam.read16(0, readBack, 128);
     
-    bool ramPass = true;
-    for(int i=0; i<128; i++) {
-        if(readBack[i] != testPattern[i]) {
-            LOG("RAM FAILURE at index %d: Expected %d, Got %d", i, testPattern[i], readBack[i]);
-            ramPass = false;
-            break;
-        }
+  bool ramPass = true;
+  for(int i=0; i<128; i++) {
+    if(readBack[i] != testPattern[i]) {
+      LOG("RAM FAILURE at index %d: Expected %d, Got %d", i, testPattern[i], readBack[i]);
+      ramPass = false;
+      break;
     }
-    if(ramPass) LOG("RAM Self-Test: PASSED");
-    else LOG("RAM Self-Test: FAILED");
-    // ----------------
+  }
+  if(ramPass) LOG("RAM Self-Test: PASSED");
+  else LOG("RAM Self-Test: FAILED");
+  // ----------------
 
-    // Mixer Gain Settings (Unity)
-    inputMixer.gain(0, 1.0f); // Hardware Input
-    inputMixer.gain(1, 1.0f); // USB Input
-    inputMixer.gain(2, 0.0f);
-    inputMixer.gain(3, 0.0f);
+  // Mixer Gain Settings (Unity)
+  inputMixer.gain(0, 1.0f); // Hardware Input
+  inputMixer.gain(1, 1.0f); // USB Input
+  inputMixer.gain(2, 0.0f);
+  inputMixer.gain(3, 0.0f);
 
-    outputMixer.gain(0, 1.0f); // Wet
-    outputMixer.gain(1, 1.0f); // Dry
-    outputMixer.gain(2, 0.0f);
-    outputMixer.gain(3, 0.0f);
+  outputMixer.gain(0, 1.0f); // Wet
+  outputMixer.gain(1, 1.0f); // Dry
+  outputMixer.gain(2, 0.0f);
+  outputMixer.gain(3, 0.0f);
 
-    // Enable Codec
-    codecControl.disable();
-    delay(100);
-    codecControl.enable();
-    delay(100);
+  // Enable Codec
+  codecControl.disable();
+  delay(100);
+  codecControl.enable();
+  delay(100);
 
-    // Set Headphone Volume
-    codecControl.setHeadphoneVolume(HEADPHONE_VOLUME);
+  // Set Headphone Volume
+  codecControl.setHeadphoneVolume(HEADPHONE_VOLUME);
     
-    // Settle controls to avoid initial spurious reads
-    for (unsigned i = 0; i < controls.getNumSwitches(); i++) {
-        bool dummy;
-        controls.hasSwitchChanged(i, dummy);
-        delay(10);
-    }
-    pot1.setInitialValue(1.0f);
+  // Settle controls to avoid initial spurious reads
+  for (unsigned i = 0; i < controls.getNumSwitches(); i++) {
+    bool dummy;
+    controls.hasSwitchChanged(i, dummy);
+    delay(10);
+  }
+  pot1.setInitialValue(1.0f);
 
-    LOG("Setup Complete!");
+  LOG("Setup Complete!");
 }
 
 // -------------------------------------------------------------------------
 // Main Loop
 // -------------------------------------------------------------------------
 void loop() {
-    // Check if the Looper requested a Pot Reset (e.g. after starting a new layer)
-    if (looper.popRequestPotReset()) {
-        pot1.setInitialValue(1.0f);
-        LOG("System: Pot Reset Requested -> Unlocked to 1.0");
-    }
+  handlePot();
+  handleFootswitch();
+  handleLed();
+}
 
-    // 1. Handle Inputs
-    // Update Potentiometer (Handles Soft Takeover)
-    if (pot1.update()) {
-        // Update Smart Mute State based on Pot
-        looper.updateSmartMute(pot1.getValue());
-    }
+void handlePot() {
+  // Check if the Looper requested a Pot Reset (e.g. after starting a new layer)
+  if (looper.popRequestPotReset()) {
+    pot1.setInitialValue(1.0f);
+    LOG("System: Pot Reset Requested -> Unlocked to 1.0");
+  }
 
-    handleFootswitch();
-    
-    // 2. Update Feedback
-    handleLed();
+  // 1. Handle Inputs
+  // Update Potentiometer (Handles Soft Takeover)
+  if (pot1.update()) {
+    // Update Smart Mute State based on Pot
+    looper.updateSmartMute(pot1.getValue());
+  }
 }
 
 void handleFootswitch() {
-    fs1.update();
-    fs2.update();
+  fs1.update();
+  fs2.update();
 
-    if (fs1.pressed()) {
-        // // Detect if we are about to start a NEW recording (Branching/Layering)
-        // // This happens if we are currently PLAYING and haven't reached max tracks yet.
-        // // Triggering now will switch us to RECORD state for the next track.
-        // bool startingNewLayer = looper.isPlaying() && !looper.isMaxTracksReached();
-        //
-        // if (startingNewLayer) {
-        //     // Force pot to 1.0 so the new layer is immediately audible
-        //     pot1.setInitialValue(1.0f);
-        //     LOG("System: New Layer Started -> Pot Unlocked to 1.0");
-        // }
-        //
-        looper.trigger();
-    }
-    
-    if (fs2.pressed()) {
-        looper.reset();
-    }
+  if (fs1.pressed()) {
+    looper.trigger();
+  }
+
+  if (fs2.pressed()) {
+    looper.reset();
+  }
 }
 
 void handleLed() {
-    led1.update();
+  led1.update();
 
-    // Blink if waiting for a state change (Quantized start/stop)
-    if (looper.isWaiting()) {
-        led1.blink(250);
-        return;
-    }
+  // Blink if waiting for a state change (Quantized start/stop)
+  if (looper.isWaiting()) {
+    led1.blink(250);
+    return;
+  }
 
-    // Solid state feedback
-    if (looper.isIdle()) {
-        led1.off();
-    } else if (looper.isRecording() || looper.isPlaying()) {
-        led1.on();
-    } else {
-        // Fallback (e.g. stopped but not idle, though currently reset handles that)
-        led1.off();
-    }
+  // Solid state feedback
+  if (looper.isIdle()) {
+    led1.off();
+  } else if (looper.isRecording() || looper.isPlaying()) {
+    led1.on();
+  } else {
+    // Fallback (e.g. stopped but not idle, though currently reset handles that)
+    led1.off();
+  }
 }

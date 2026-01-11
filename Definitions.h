@@ -4,9 +4,9 @@
 #define DEBUG_MODE 1
 
 #if DEBUG_MODE
-    #define LOG(...) do { Serial.printf(__VA_ARGS__); Serial.println(); } while (0)
+  #define LOG(...) do { Serial.printf(__VA_ARGS__); Serial.println(); } while (0)
 #else
-    #define LOG(...)
+  #define LOG(...)
 #endif
 
 // --- Hardware ---
