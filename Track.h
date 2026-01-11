@@ -8,6 +8,14 @@
 
 class Track {
 public:
+  enum State {
+    NONE,
+    RECORD,
+    PLAY,
+    OVERDUB,
+    STOP
+  };
+
   Track(Ram* ram) : ram(ram)
   {
     hardReset();
@@ -18,174 +26,104 @@ public:
   void update(audio_block_t* inBlock, audio_block_t* outBlock) {
     // --- Safety Checks ---
     // Output Block should already be zeroed coming in!!
-    if (!inBlock || !outBlock || !address) return; // if RAM addr = 0, we have nothing to play!
-    // --- RAM Bounds Check ---
-    if (!isTimelineLocked && isRamOutOfBounds(1)) stopRecording();
+    if (!inBlock || !outBlock) return;
 
-    if (isTimelineLocked && playhead >= timeline) {
-      playhead = 0;
-      gc_xfade.hardReset(1.0f);
-      gc_xfade.mute();
-    }
+    updateState();
 
-    if (stopped && gc_volume.isDone()) { // stopped and micro-fade complete
-      playhead = 0;
-      return;
-    }
+    switch (state) {
+      case RECORD: {
+        size_t addrOffset = BLOCKS_TO_ADDR(address + timeline);
 
-    /*
-     * Tasks for the update loop:
-     *   - record fade in
-     *   - record full loop
-     *   - playback loop while recording xfade
-     *   - mix in xfade to front of loop
-     *   - continue playback
-     *   - overdub & stop & start track
-     *   - update track volume
-     * */
-
-    int16_t tmp_inBlock[AUDIO_BLOCK_SAMPLES];
-    int16_t tmp_xfadeBlock[AUDIO_BLOCK_SAMPLES];
-    size_t addrOffset, xfadeOffset;
-
-    if (isTimelineLocked) {
-      addrOffset = BLOCKS_TO_ADDR(playhead);
-
-      // --- Processing CROSS FADE ---
-      // once xfadeRecord reaches FADE_DURATION_BLOCKS, we are done
-      // recording xfade
-      if (xfadeBlockCount < FADE_DURATION_BLOCKS) {
-        if (!isRamOutOfBounds(xfadeBlockCount + 1)) {
-           xfadeOffset = BLOCKS_TO_ADDR(timeline + xfadeBlockCount);
-           ram->write16(address + xfadeOffset, inBlock->data, AUDIO_BLOCK_SAMPLES);
-        }
-        xfadeBlockCount++;
-      }
-      else if (playhead < FADE_DURATION_BLOCKS) {
-        xfadeOffset = BLOCKS_TO_ADDR(timeline + playhead);
-        ram->read16(address + xfadeOffset, tmp_xfadeBlock, AUDIO_BLOCK_SAMPLES);
-      }
-      // -----------------------------
-
-      // load playback block from ram
-      ram->read16(address + addrOffset, outBlock->data, AUDIO_BLOCK_SAMPLES);
-    }
-    else {
-      addrOffset = BLOCKS_TO_ADDR(timeline);
-    }
-
-    // --- Individual Sample Processing ---
-    for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
-      int32_t s_in = inBlock->data[i];
-      int32_t s_out = outBlock->data[i];
-
-      // --- Processing IN Block ---
-      if (isRecordActive()) {
-        s_in *= gc_record.get(i); // fade in/out gain value
-
-        if (isTimelineLocked) { // if we have a base-loop
-          s_in += (int32_t)(s_out * FEEDBACK_MULTIPLIER); // mix in base-loop with decay
-          s_in = SAMPLE_LIMITER(s_in);  // hard limiter
+        for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
+          int16_t s_in = inBlock->data[i] * gc_record.get(i);
+          ram->write16(addrOffset + i, s_in);
         }
 
-        tmp_inBlock[i] = (int16_t)s_in;
+        timeline++;
+        break;
       }
-      // ---------------------------
 
-      // --- Processing OUT Block ---
-      if (isXfadeComplete() && playhead < FADE_DURATION_BLOCKS) {
-        s_out += (int32_t)tmp_xfadeBlock[i] * gc_xfade.get(i);
+      case OVERDUB:
+      case PLAY: {
+        size_t addrOffset = BLOCKS_TO_ADDR(address + playhead);
+        size_t xfadeOffset = BLOCKS_TO_ADDR(address + timeline + playhead);
+        bool recordXfade = xfadeBlockCount < FADE_DURATION_BLOCKS;
+        bool processXfade = !recordXfade && playhead < FADE_DURATION_BLOCKS;
+
+        if (playhead == 0) {
+          gc_xfade.hardReset(1.0f);
+          gc_xfade.fadeOut();
+        }
+
+        ram->read16(addrOffset, outBlock->data, AUDIO_BLOCK_SAMPLES);
+
+        for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
+          int32_t s_in = inBlock->data[i];
+          int32_t s_out = outBlock->data[i];
+
+          if (recordXfade) {
+            int16_t s_xfade = s_in * gc_xfade.get(i);
+            ram->write16(xfadeOffset + i, s_xfade);
+          }
+          else if (processXfade) {
+            int32_t s_xfade; ram->read16(xfadeOffset + i, s_xfade);
+            s_out += s_xfade * gc_xfade.get(i);
+          }
+
+          if (state == OVERDUB) {
+            s_in *= gc_record.get(i);
+            s_in += s_out;
+            s_in *= FEEDBACK_MULTIPLIER;
+            ram->write16(addrOffset + i, (int16_t)s_in);
+          }
+
+          s_out *= gc_volume.get(i);
+          s_out = SAMPLE_LIMITER(s_out);
+          outBlock->data[i] = (int16_t)s_out;
+        }
+
+        if (recordXfade) xfadeBlockCount++;
+        playhead++;
+        if (playhead >= timeline) playhead = 0;
+        break;
       }
-      s_out *= gc_volume.get(i);
-      s_out = SAMPLE_LIMITER(s_out);  // hard limiter
-      outBlock->data[i] = (int16_t)s_out;
-      // ----------------------------
-    }
-    // ------------------------------------
 
-    if (isRecordActive()) {
-      // this takes care of recording the base-loop as well as any
-      // overdub loops
-      ram->write16(address + addrOffset, tmp_inBlock, AUDIO_BLOCK_SAMPLES);
-    }
-
-    if (!isTimelineLocked) timeline++;
-    else playhead++;
-  }
-
-  void startRecording() {
-    AudioNoInterrupts();
-    if (!address) {
-      if (lock_nextAvailableAddress) {
-        AudioInterrupts();
+      case STOP:
+        playhead = 0;
         return;
-      }
-      address = nextAvailableAddress;
-      lock_nextAvailableAddress = true;
-      
-      // Assign allocation ID
-      activeAllocationCount++;
-      allocationId = activeAllocationCount;
-    }
-    AudioInterrupts();
 
-    if (!init) { // START RECORDING
-      AudioNoInterrupts();
-      hardReset();
-      gc_record.unmute();
-      init = true;
-      AudioInterrupts();
-      return;
-    }
-
-    if (isTimelineLocked && isXfadeComplete && gc_record.isDone()) {
-      gc_record.unmute(); // start overdub
+      default:
+        return;
     }
   }
 
-  /*
-   * If actualBlockLength is used, we trim the timeline to this length
-   * */
-  void stopRecording() { stopRecording(0); }
-  void stopRecording(size_t actualBlockLength) {
-    if (!address || !init) return;
+  void record() { reqState = RECORD; }
+  void play() { reqState = PLAY; }
+  void overdub() { reqState = OVERDUB; }
+  void stop() { reqState = STOP; }
 
-    if (!isTimelineLocked) {
-      // STOP RECORDING
-      AudioNoInterrupts();
-      isTimelineLocked = true;
-      gc_record.hardReset(0.0f);
-      playhead = 0;
-      if (actualBlockLength && actualBlockLength > timeline) {
-        // fill up xfade buffer if we've already recorded it
-        xfadeBlockCount = actualBlockLength - timeline;
-        timeline = actualBlockLength;
-      }
-      nextAvailableAddress += BLOCKS_TO_ADDR(timeline + FADE_DURATION_BLOCKS);
-      lock_nextAvailableAddress = false;
-      AudioInterrupts();
-    }
-    else if (isTimelineLocked && isXfadeComplete && gc_record.isDone()) {
-      gc_record.mute(); // stop overdub
-    }
+  void trimLength(size_t n_actualBlockLength) {
+    actualBlockLength = n_actualBlockLength;
+    trim = true;
   }
 
   void mute(bool willMute) {
-    muted = willMute;
-    gc_volume.mute(muted);
+    mute = willMute;
+    gc_volume.mute(willMute);
+  }
+
+  void toggleMute() {
+    if (mute) mute = false;
+    else mute = true;
+    gc_volume.mute(mute);
   }
 
   bool isMuted() {
-    return muted;
+    return mute && gc_volume.isMuteDone();
   }
 
-  void stop(bool willStop) {
-    stopped = willStop;
-    gc_volume.mute(willStop || muted);
-  }
-
-  bool isStopped() {
-    return stopped;
+  State getState() {
+    return state;
   }
 
   void setVolume(float n_volume) {
@@ -193,18 +131,17 @@ public:
   }
 
   void clear() {
-    if (!stopped || !gc_volume.isDone()) return;
-    
     // STRICT LIFO CHECK
     // Only clear if this is the most recently allocated track
     if (allocationId != activeAllocationCount) return;
 
-    AudioNoInterrupts();
+    if (state != STOP && state != NONE) return;
+
     // Reclaim memory
     nextAvailableAddress = address;
     activeAllocationCount--;
     allocationId = 0;
-    AudioInterrupts();
+    address = 0;
 
     hardReset();
   }
@@ -213,39 +150,44 @@ public:
     return xfadeBlockCount >= FADE_DURATION_BLOCKS;
   }
 
-  size_t getMemorySize() {
-    return BLOCKS_TO_ADDR(timeline + FADE_DURATION_BLOCKS);
-  }
+  size_t getTimelineLength() { return timeline; }
 
 private:
+  static inline size_t nextAvailableAddress = 1;
+  static inline bool lock_nextAvailableAddress = false;
+  static inline int activeAllocationCount = 0;
+
   Ram* ram;
-  GainControl gc_volume, gc_record, gc_xfade;
-  volatile size_t address; // start pos in ram
-  volatile uint32_t playhead;  // pos on timeline in audio blocks
-  volatile uint32_t timeline;  // length of playable loop in audio blocks
-  volatile uint32_t xfadeBlockCount;  // block pos for crossfade samples
-  volatile bool isTimelineLocked;  // have we recorded a full loop
-  volatile bool stopped;
-  volatile bool muted;
-  volatile bool init;
   int allocationId;
-  
+  State state, nextState, reqState;
+  GainControl gc_volume, gc_record, gc_xfade;
+
+  size_t address; // start pos in ram
+  size_t playhead;  // pos on timeline in audio blocks
+  size_t timeline;  // length of playable loop in audio blocks
+  uint16_t xfadeBlockCount;  // block pos for crossfade samples
+  size_t actualBlockLength;
+  bool trim;
+  bool mute;
+
   void hardReset() {
-    AudioNoInterrupts();
+    // allocationId = 0; // only reset from clear()
+
+    state = NONE;
+    nextState = NONE;
+    reqState = NONE;
 
     gc_volume.hardReset(1.0f);
     gc_record.hardReset(0.0f);
     gc_xfade.hardReset(1.0f);
-    address = 0; // must be 1 or greater to signfiy we have data
+
+    // address = 0; // only reset from clear()
     playhead = 0;
     timeline = 0;
     xfadeBlockCount = 0;
-    isTimelineLocked = false;
-    stopped = false;
-    muted = false;
-    init = false;
-    
-    AudioInterrupts();
+    actualBlockLength = 0;
+    trim = false;
+    mute = false;
   }
 
   bool isRamOutOfBounds(uint32_t extraBlocks) {
@@ -253,11 +195,105 @@ private:
       return end_pos_samples >= TOTAL_SRAM_SAMPLES;
   }
 
-  bool isRecordActive() { return !gc_record.isMuted() || !gc_record.isDone(); }
-  
-  static inline size_t nextAvailableAddress = 1;
-  static inline bool lock_nextAvailableAddress = false;
-  static inline int activeAllocationCount = 0;
+  void updateState() {
+    switch (state) {
+      case NONE:
+        if (reqState == RECORD) {
+          hardReset();
+
+          if (!address) {
+            if (lock_nextAvailableAddress) return;
+
+            address = nextAvailableAddress;
+            lock_nextAvailableAddress = true;
+            
+            // Assign allocation ID
+            activeAllocationCount++;
+            allocationId = activeAllocationCount;
+          }
+
+          gc_record.fadeIn();
+
+          state = RECORD;
+          nextState = NONE;
+          reqState = NONE;
+        }
+        break;
+
+      case RECORD:
+        if (isRamOutOfBounds(1)) reqState = PLAY; // RAM Bounds Check
+
+        if (reqState == PLAY) {
+          gc_record.hardReset(0.0f);
+          xfadeBlockCount = 0;
+
+          if (trim && actualBlockLength > timeline) {
+            xfadeBlockCount = actualBlockLength - timeline;
+            timeline = actualBlockLength;
+          }
+
+          nextAvailableAddress += BLOCKS_TO_ADDR(timeline + FADE_DURATION_BLOCKS);
+          lock_nextAvailableAddress = false;
+
+          state = reqState;
+          nextState = NONE;
+          reqState = NONE;
+        }
+        break;
+
+      case PLAY:
+        if (reqState == OVERDUB) {
+          gc_record.fadeIn();
+
+          state = reqState;
+          nextState = NONE;
+          reqState = NONE;
+        }
+
+        if (reqState == STOP) {
+          gc_volume.mute();
+
+          nextState = reqState;
+          reqState = NONE;
+        }
+        if (nextState == STOP && gc_volume.isDone()) {
+          state = nextState;
+          nextState = NONE;
+          reqState = NONE;
+        }
+        break;
+
+      case OVERDUB:
+        if (reqState == PLAY) {
+          gc_record.fadeOut();
+
+          nextState = reqState;
+          reqState = NONE;
+        }
+        if (nextState == PLAY && gc_record.isDone()) {
+          state = nextState;
+          nextState = NONE;
+          reqState = NONE;
+        }
+        break;
+
+      case STOP:
+        if (reqState == PLAY) {
+          if (!mute) gc_volume.unmute();
+
+          state = reqState;
+          nextState = NONE;
+          reqState = NONE;
+        }
+        break;
+
+      default:
+        state = NONE;
+        nextState = NONE;
+        reqState = NONE;
+        break;
+    }
+  }
 };
 
 #endif

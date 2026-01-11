@@ -30,10 +30,12 @@ public:
         return blockCounter >= FADE_DURATION_BLOCKS;
     }
 
+    void fadeIn() { unmute(); }
     void unmute() {
         startFadeTo(userGain);
     }
 
+    void fadeOut() { mute(); }
     void mute() {
         startFadeTo(0.0f);
     }
@@ -57,14 +59,16 @@ public:
         return false;
     }
 
+    bool isMuteDone() {
+      return isMuted() && isDone();
+    }
+
     void hardReset(float gain) {
-        AudioNoInterrupts();
         userGain = gain;
         targetGain = gain;
         startGain = gain;
         currentGain = gain;
         blockCounter = FADE_DURATION_BLOCKS;
-        AudioInterrupts();
     }
 
     // This is expected to be called from the Audio Interrupt (update)
@@ -104,18 +108,13 @@ private:
 
     void startFadeTo(float newTarget) {
         // Protect critical section: multiple variables updated that are read by ISR
-        AudioNoInterrupts();
-        
         if (targetGain == newTarget && isDone()) {
-            AudioInterrupts();
             return; // Already there
         }
 
         startGain = currentGain; // Start from wherever we are right now
         targetGain = newTarget;
         blockCounter = 0;
-        
-        AudioInterrupts();
     }
 };
 
