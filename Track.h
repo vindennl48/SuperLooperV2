@@ -43,7 +43,7 @@ public:
         }
 
         for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
-          buffer[i] = inBlock->data[i] * gc_record.get(i);
+          buffer[i] = (int16_t)(inBlock->data[i] * gc_record.get(i));
         }
         ram->write16(addrOffset, buffer, AUDIO_BLOCK_SAMPLES);
 
@@ -55,8 +55,9 @@ public:
       case PLAY: {
         size_t addrOffset = address + BLOCKS_TO_ADDR(playhead);
         size_t xfadeOffset = address + BLOCKS_TO_ADDR(timeline + playhead);
-        int16_t buffer[AUDIO_BLOCK_SAMPLES];
+        int16_t playBuffer[AUDIO_BLOCK_SAMPLES];
         int16_t xfadeBuffer[AUDIO_BLOCK_SAMPLES];
+        int16_t overdubBuffer[AUDIO_BLOCK_SAMPLES];
         
         bool recordXfade = xfadeBlockCount < FADE_DURATION_BLOCKS;
         bool processXfade = !recordXfade && playhead < FADE_DURATION_BLOCKS;
@@ -66,34 +67,39 @@ public:
           gc_xfade.fadeOut();
         }
 
-        ram->read16(addrOffset, outBlock->data, AUDIO_BLOCK_SAMPLES);
+        // 1. Bulk Read Main Audio into local buffer
+        ram->read16(addrOffset, playBuffer, AUDIO_BLOCK_SAMPLES);
 
-        if (recordXfade)
+        if (recordXfade) {
           ram->write16(xfadeOffset, inBlock->data, AUDIO_BLOCK_SAMPLES);
-        else if (processXfade)
+        } else if (processXfade) {
           ram->read16(xfadeOffset, xfadeBuffer, AUDIO_BLOCK_SAMPLES);
+        }
 
         for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
           int32_t s_in = inBlock->data[i];
-          int32_t s_out = outBlock->data[i];
+          int32_t s_out = playBuffer[i];
 
-          // if processXfade add xfadeBuffer to s_out
-          if (processXfade) s_out += xfadeBuffer[i] * gc_xfade.get(i);
+          // If processXfade add xfadeBuffer to s_out
+          if (processXfade) s_out += (int32_t)(xfadeBuffer[i] * gc_xfade.get(i));
 
           if (state == OVERDUB) {
-            s_in *= gc_record.get(i);
-            s_in += s_out;
-            s_in *= FEEDBACK_MULTIPLIER;
-            buffer[i] = (int16_t)s_in;
+            int32_t s_rec = (int32_t)(s_in * gc_record.get(i));
+            s_rec += s_out;
+            s_rec *= FEEDBACK_MULTIPLIER;
+            overdubBuffer[i] = (int16_t)s_rec;
           }
 
           s_out *= gc_volume.get(i);
           s_out = SAMPLE_LIMITER(s_out);
-          outBlock->data[i] = (int16_t)s_out;
+          
+          // SUM into output block instead of assigning
+          int32_t finalOut = outBlock->data[i] + s_out;
+          outBlock->data[i] = (int16_t)SAMPLE_LIMITER(finalOut);
         }
 
         if (state == OVERDUB) {
-          ram->write16(addrOffset, buffer, AUDIO_BLOCK_SAMPLES);
+          ram->write16(addrOffset, overdubBuffer, AUDIO_BLOCK_SAMPLES);
         }
 
         if (recordXfade) xfadeBlockCount++;
@@ -104,11 +110,16 @@ public:
 
       case STOP:
         playhead = 0;
-        return;
+        break;
 
       default:
-        return;
+        break;
     }
+
+    // Advance fades once per block
+    gc_volume.update();
+    gc_record.update();
+    gc_xfade.update();
   }
 
   void record() { reqState = RECORD; }
@@ -215,6 +226,8 @@ private:
 
     gc_volume.hardReset(1.0f);
     gc_record.hardReset(0.0f);
+    // Set user gain to 1.0 so fadeIn() has a target, while keeping current state at 0.0
+    gc_record.setGain(1.0f); 
     gc_xfade.hardReset(1.0f);
 
     // address = 0; // only reset from clear()

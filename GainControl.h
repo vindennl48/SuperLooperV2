@@ -75,8 +75,7 @@ public:
     float get(int sampleNum) {
         // If fade is complete, return target immediately
         if (isDone()) {
-             currentGain = targetGain;
-             return currentGain;
+             return targetGain;
         }
 
         // Calculate progress
@@ -90,13 +89,14 @@ public:
 
         // Linear interpolation
         currentGain = startGain + (targetGain - startGain) * t;
+        return currentGain;
+    }
 
-        // Auto-increment block counter at the end of the block
-        if (sampleNum >= AUDIO_BLOCK_SAMPLES - 1) {
+    // Must be called once per block by the owner to advance fades
+    void update() {
+        if (blockCounter < FADE_DURATION_BLOCKS) {
             blockCounter++;
         }
-
-        return currentGain;
     }
 
 private:

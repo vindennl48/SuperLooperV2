@@ -11,7 +11,8 @@ public:
     NONE,
     RECORD,
     PLAY,
-    STOP
+    STOP,
+    RESET
   };
 
   AudioLooper(void) : AudioStream(1, inputQueueArray) {
@@ -45,7 +46,17 @@ public:
     return activeTrackIndex >= NUM_LOOPS - 1;
   }
 
+  bool popRequestPotReset() {
+    if (shouldResetPot) {
+      shouldResetPot = false;
+      return true;
+    }
+    return false;
+  }
+
   void updateSmartMute(float potValue) {
+    if (state == RESET || reqState == RESET) return;
+
     // Track 0 (Base) is always unmuted
     tracks[0]->mute(false);
 
@@ -130,18 +141,8 @@ public:
   }
 
   void reset() {
-    for (int i = NUM_LOOPS-1; i >= 0; i--) {
-      tracks[i]->stop();
-      for (int j = 0; j < 100; j++) {
-        if (tracks[i]->isStopped()) break;
-        delay(10);
-      }
-      AudioNoInterrupts();
-      tracks[i]->clear();
-      AudioInterrupts();
-    }
-
-    hardReset();
+    reqState = RESET;
+    LOG("AudioLooper::reset() -> Requesting RESET");
   }
 
 private:
@@ -152,21 +153,33 @@ private:
   size_t playhead; // by blocks
   size_t timeline; // by blocks
   int activeTrackIndex;
+  volatile bool shouldResetPot;
 
   void hardReset() {
     LOG("AudioLooper::hardReset() called");
-    AudioNoInterrupts();
     state = NONE;
     reqState = NONE;
     playhead = 0; // by blocks
     timeline = 0; // by blocks
     activeTrackIndex = 0;
-    AudioInterrupts();
+    shouldResetPot = false;
   }
 
   void updateState() {
+    // Prioritize RESET request: ignore sync wait
+    if (reqState == RESET) {
+      LOG("AudioLooper::updateState() -> Starting RESET Sequence (Fade Out)");
+      state = RESET;
+      reqState = NONE;
+      // Initiate fade out on all active tracks
+      for (int i = 0; i <= activeTrackIndex; i++) {
+          tracks[i]->mute(true);
+      }
+    }
+
     // Wait for the start of the global loop to sync state changes
-    if (timeline > 0 && playhead != 0) return;
+    // Exception: If we are in RESET state, we continue to process logic immediately
+    if (state != RESET && timeline > 0 && playhead != 0) return;
 
     switch (state) {
       case NONE:
@@ -204,6 +217,7 @@ private:
             activeTrackIndex++;
             LOG("AudioLooper::updateState() -> Starting New Layer Recording on Track %d", activeTrackIndex);
             tracks[activeTrackIndex]->record();
+            shouldResetPot = true;
 
             state = reqState;
           } else {
@@ -211,6 +225,30 @@ private:
           }
 
           reqState = NONE;
+        }
+        break;
+
+      case RESET:
+        {
+          bool allSilent = true;
+          for (int i = 0; i <= activeTrackIndex; i++) {
+            // Check if track is fully muted (faded out)
+            // Note: We used mute(true) which sets muteState=true and starts fade to 0.
+            // isMuted() checks (muteState && gc_volume.isMuteDone())
+            if (!tracks[i]->isMuted()) {
+              allSilent = false;
+              break;
+            }
+          }
+
+          if (allSilent) {
+            for (int i = NUM_LOOPS-1; i >= 0; i--) {
+              tracks[i]->forceClear(); // Use forceClear to bypass state checks since we are resetting everything
+            }
+            
+            hardReset();
+            LOG("AudioLooper::updateState() -> RESET Complete");
+          }
         }
         break;
 

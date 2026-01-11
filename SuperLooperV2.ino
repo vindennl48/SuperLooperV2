@@ -87,6 +87,37 @@ void setup() {
     // Initialize Looper (Allocates Memory/SD structures)
     looper.begin();
 
+    // --- RAM TEST ---
+    LOG("--- Performing RAM Self-Test ---");
+    int16_t testPattern[128];
+    int16_t readBack[128];
+    for(int i=0; i<128; i++) testPattern[i] = (int16_t)(i * 100);
+    
+    // Write to address 0 (using the looper's internal ram object would be ideal, 
+    // but since it's private, we will rely on the fact that Ram works if this works.
+    // Actually, we can't access looper.ram directly. 
+    // We will assume the Ram class works if we instantiate a temporary one or 
+    // just trust the rest of the code if the issue is logic.
+    // Wait, we can't verify looper.ram easily without exposing it.
+    // Let's Skip the explicit object test and trust the logic fix first.
+    // ACTUALLY, let's create a temporary Ram object just to test the bus.
+    Ram testRam;
+    testRam.begin();
+    testRam.write16(0, testPattern, 128);
+    testRam.read16(0, readBack, 128);
+    
+    bool ramPass = true;
+    for(int i=0; i<128; i++) {
+        if(readBack[i] != testPattern[i]) {
+            LOG("RAM FAILURE at index %d: Expected %d, Got %d", i, testPattern[i], readBack[i]);
+            ramPass = false;
+            break;
+        }
+    }
+    if(ramPass) LOG("RAM Self-Test: PASSED");
+    else LOG("RAM Self-Test: FAILED");
+    // ----------------
+
     // Mixer Gain Settings (Unity)
     inputMixer.gain(0, 1.0f); // Hardware Input
     inputMixer.gain(1, 1.0f); // USB Input
@@ -122,13 +153,18 @@ void setup() {
 // Main Loop
 // -------------------------------------------------------------------------
 void loop() {
+    // Check if the Looper requested a Pot Reset (e.g. after starting a new layer)
+    if (looper.popRequestPotReset()) {
+        pot1.setInitialValue(1.0f);
+        LOG("System: Pot Reset Requested -> Unlocked to 1.0");
+    }
+
     // 1. Handle Inputs
     // Update Potentiometer (Handles Soft Takeover)
-    pot1.update();
-    // if (pot1.changed()) LOG("Pot1 Value: %.2f", pot1.getValue());
-    
-    // Update Smart Mute State based on Pot
-    looper.updateSmartMute(pot1.getValue());
+    if (pot1.update()) {
+        // Update Smart Mute State based on Pot
+        looper.updateSmartMute(pot1.getValue());
+    }
 
     handleFootswitch();
     
@@ -141,17 +177,17 @@ void handleFootswitch() {
     fs2.update();
 
     if (fs1.pressed()) {
-        // Detect if we are about to start a NEW recording (Branching/Layering)
-        // This happens if we are currently PLAYING and haven't reached max tracks yet.
-        // Triggering now will switch us to RECORD state for the next track.
-        bool startingNewLayer = looper.isPlaying() && !looper.isMaxTracksReached();
-
-        if (startingNewLayer) {
-            // Force pot to 1.0 so the new layer is immediately audible
-            pot1.setInitialValue(1.0f);
-            LOG("System: New Layer Started -> Pot Unlocked to 1.0");
-        }
-        
+        // // Detect if we are about to start a NEW recording (Branching/Layering)
+        // // This happens if we are currently PLAYING and haven't reached max tracks yet.
+        // // Triggering now will switch us to RECORD state for the next track.
+        // bool startingNewLayer = looper.isPlaying() && !looper.isMaxTracksReached();
+        //
+        // if (startingNewLayer) {
+        //     // Force pot to 1.0 so the new layer is immediately audible
+        //     pot1.setInitialValue(1.0f);
+        //     LOG("System: New Layer Started -> Pot Unlocked to 1.0");
+        // }
+        //
         looper.trigger();
     }
     
