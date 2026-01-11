@@ -3,6 +3,7 @@
 
 #include <AudioStream.h>
 #include "Definitions.h"
+#include "GainControl.h"
 #include "Track.h"
 
 class AudioLooper : public AudioStream {
@@ -135,9 +136,15 @@ public:
       tracks[i]->update(inBlock, outBlock);
     }
 
+    for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
+      outBlock->data[i] *= gc_volume.get(i);
+    }
+
     transmit(outBlock, 0);
     release(outBlock);
     release(inBlock);
+
+    gc_volume.update();
   }
 
   void reset() {
@@ -149,6 +156,7 @@ private:
   audio_block_t *inputQueueArray[1];
   Track* tracks[NUM_LOOPS];
   Ram ram;
+  GainControl gc_volume;
   volatile State state, reqState;
   size_t playhead; // by blocks
   size_t timeline; // by blocks
@@ -157,6 +165,7 @@ private:
 
   void hardReset() {
     LOG("AudioLooper::hardReset() called");
+    gc_volume.hardReset(1.0f);
     state = NONE;
     reqState = NONE;
     playhead = 0; // by blocks
@@ -169,12 +178,10 @@ private:
     // Prioritize RESET request: ignore sync wait
     if (reqState == RESET) {
       LOG("AudioLooper::updateState() -> Starting RESET Sequence (Fade Out)");
-      state = RESET;
+      gc_volume.mute();
+
+      state = reqState;
       reqState = NONE;
-      // Initiate fade out on all active tracks
-      for (int i = 0; i <= activeTrackIndex; i++) {
-          tracks[i]->mute(true);
-      }
     }
 
     // Wait for the start of the global loop to sync state changes
@@ -229,26 +236,15 @@ private:
         break;
 
       case RESET:
-        {
-          bool allSilent = true;
-          for (int i = 0; i <= activeTrackIndex; i++) {
-            // Check if track is fully muted (faded out)
-            // Note: We used mute(true) which sets muteState=true and starts fade to 0.
-            // isMuted() checks (muteState && gc_volume.isMuteDone())
-            if (!tracks[i]->isMuted()) {
-              allSilent = false;
-              break;
-            }
+        if (gc_volume.isDone()) {
+          int initial = activeTrackIndex;
+          for (int i = initial; i >= 0; i--) {
+            tracks[i]->forceClear(); // Use forceClear to bypass state checks since we are resetting everything
+            if (activeTrackIndex > 1) activeTrackIndex--;
           }
 
-          if (allSilent) {
-            for (int i = NUM_LOOPS-1; i >= 0; i--) {
-              tracks[i]->forceClear(); // Use forceClear to bypass state checks since we are resetting everything
-            }
-            
-            hardReset();
-            LOG("AudioLooper::updateState() -> RESET Complete");
-          }
+          hardReset();
+          LOG("AudioLooper::updateState() -> RESET Complete");
         }
         break;
 

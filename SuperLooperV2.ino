@@ -87,6 +87,7 @@ void setup() {
   // Initialize Looper (Allocates Memory/SD structures)
   looper.begin();
 
+#if DEBUG_MODE
   // --- RAM TEST ---
   LOG("--- Performing RAM Self-Test ---");
   int16_t testPattern[128];
@@ -117,6 +118,7 @@ void setup() {
   if(ramPass) LOG("RAM Self-Test: PASSED");
   else LOG("RAM Self-Test: FAILED");
   // ----------------
+#endif
 
   // Mixer Gain Settings (Unity)
   inputMixer.gain(0, 1.0f); // Hardware Input

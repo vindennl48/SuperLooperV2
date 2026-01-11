@@ -169,15 +169,24 @@ public:
   void clear() {
     // STRICT LIFO CHECK
     // Only clear if this is the most recently allocated track
-    if (allocationId != activeAllocationCount) return;
+    if (allocationId != activeAllocationCount) {
+      LOG("##> 1. Cant Clear Track! %d", allocationId);
+      return;
+    }
 
-    if (!isStopped() && !isNone()) return;
+    if (!isStopped() && !isMuted() && !isNone()) {
+      LOG("##> 2. Cant Clear Track! %d", allocationId);
+      return;
+    }
 
     // Reclaim memory
-    nextAvailableAddress = address;
-    activeAllocationCount--;
+    if (activeAllocationCount > 0) activeAllocationCount--;
     allocationId = 0;
-    address = 0;
+
+    if (address > 0) {
+      nextAvailableAddress = address;
+      address = 0;
+    }
 
     hardReset();
   }
@@ -186,6 +195,7 @@ public:
   // MUST be called within AudioNoInterrupt() context.
   void forceClear() {
     state = NONE;
+    lock_nextAvailableAddress = false;
     clear();
   }
 
@@ -225,9 +235,8 @@ private:
     reqState = NONE;
 
     gc_volume.hardReset(1.0f);
-    gc_record.hardReset(0.0f);
     // Set user gain to 1.0 so fadeIn() has a target, while keeping current state at 0.0
-    gc_record.setGain(1.0f); 
+    gc_record.hardReset(0.0f); gc_record.setGain(1.0f); 
     gc_xfade.hardReset(1.0f);
 
     // address = 0; // only reset from clear()
@@ -240,8 +249,8 @@ private:
   }
 
   bool isRamOutOfBounds(uint32_t extraBlocks) {
-      size_t end_pos_words = address + BLOCKS_TO_ADDR(timeline + extraBlocks);
-      return end_pos_words >= TOTAL_SRAM_SAMPLES;
+    size_t end_pos_words = address + BLOCKS_TO_ADDR(timeline + extraBlocks);
+    return end_pos_words >= TOTAL_SRAM_SAMPLES;
   }
 
   void updateState() {
