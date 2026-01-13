@@ -10,6 +10,7 @@
 #include "Led.h"
 #include "Footswitch.h"
 #include "Pot.h"
+#include "MidiHandler.h"
 
 // #define USB_AUDIO
 // #ifndef USB_AUDIO
@@ -64,9 +65,9 @@ AudioConnection      patchUsb1(outputMixer, 0, usbOut, 1);
 void handlePot();
 void handleFootswitch();
 void handleLed();
-void handleMidi();
 
 MIDI_CREATE_INSTANCE(HardwareSerial, Serial1, MIDI);
+MidiHandler midiHandler(looper, MIDI);
 
 // -------------------------------------------------------------------------
 // Setup
@@ -166,7 +167,7 @@ void loop() {
   handlePot();
   handleFootswitch();
   handleLed();
-  handleMidi();
+  midiHandler.update();
 }
 
 void handlePot() {
@@ -220,76 +221,4 @@ void handleLed() {
 // -------------------------------------------------------------------------
 // MIDI Handling
 // -------------------------------------------------------------------------
-
-const char* getMidiName(byte type) {
-  // Mask off channel for voice messages (0x80 - 0xEF)
-  if (type >= 0x80 && type < 0xF0) {
-    switch (type & 0xF0) {
-      case 0x80: return "NoteOff";
-      case 0x90: return "NoteOn";
-      case 0xA0: return "PolyKeyPressure";
-      case 0xB0: return "ControlChange";
-      case 0xC0: return "ProgramChange";
-      case 0xD0: return "ChannelPressure";
-      case 0xE0: return "PitchBend";
-    }
-  }
-  // System Messages
-  switch (type) {
-    case 0xF0: return "SysEx";
-    case 0xF1: return "TimeCode";
-    case 0xF2: return "SongPos";
-    case 0xF3: return "SongSel";
-    case 0xF6: return "TuneRequest";
-    case 0xF8: return "Clock";
-    case 0xFA: return "Start";
-    case 0xFB: return "Continue";
-    case 0xFC: return "Stop";
-    case 0xFE: return "ActiveSensing";
-    case 0xFF: return "SystemReset";
-  }
-  return "Unknown";
-}
-
-// Unified Logic Handler (Logs + Application Triggers)
-void processCommonMidi(byte type, byte channel, byte data1, byte data2, const char* source) {
-  // Log to Serial Monitor
-  LOG("MIDI %s: %s (%d), Ch=%d, D1=%d, D2=%d", source, getMidiName(type), type, channel, data1, data2);
-
-  // Application Logic: CC 1 -> Trigger Looper
-  if ((type & 0xF0) == 0xB0 && data1 == 1) {
-    looper.trigger();
-  }
-}
-
-void handleMidi() {
-  // 1. Process USB MIDI
-  if (usbMIDI.read()) {
-    byte type = usbMIDI.getType();
-    byte channel = usbMIDI.getChannel();
-    byte data1 = usbMIDI.getData1();
-    byte data2 = usbMIDI.getData2();
-
-    processCommonMidi(type, channel, data1, data2, "USB");
-
-    // Thru to Hardware MIDI
-    if (type < 0xF0) { 
-        MIDI.send((midi::MidiType)type, data1, data2, channel);
-    }
-  }
-
-  // 2. Process Hardware MIDI
-  if (MIDI.read()) {
-    byte type = (byte)MIDI.getType();
-    byte channel = MIDI.getChannel();
-    byte data1 = MIDI.getData1();
-    byte data2 = MIDI.getData2();
-
-    processCommonMidi(type, channel, data1, data2, "Serial");
-
-    // Thru to USB MIDI
-    if (type < 0xF0) {
-        usbMIDI.send(type, data1, data2, channel, 0); 
-    }
-  }
-}
+// (Moved to MidiHandler.h)
