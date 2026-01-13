@@ -6,14 +6,15 @@
 #include "AudioLooper.h"
 #include "MidiDefs.h"
 #include "Definitions.h"
+#include "MidiClock.h"
 
 // Define the Serial MIDI type alias for convenience
 typedef midi::MidiInterface<midi::SerialMIDI<HardwareSerial>> SerialMidiInterface;
 
 class MidiHandler {
 public:
-  MidiHandler(AudioLooper& looper, SerialMidiInterface& midi) 
-    : _looper(looper), _midi(midi) {}
+  MidiHandler(AudioLooper& looper, SerialMidiInterface& midi, MidiClock& clock) 
+    : _looper(looper), _midi(midi), _clock(clock) {}
 
   void update() {
     // 1. Process USB MIDI
@@ -51,6 +52,7 @@ public:
 private:
   AudioLooper& _looper;
   SerialMidiInterface& _midi;
+  MidiClock& _clock;
 
   const char* getMidiName(byte type) {
     // Check Control Change (Channel Voice Message)
@@ -82,6 +84,19 @@ private:
       } else if (data1 == 11) {
         _looper.reset();
       }
+    }
+    // Realtime / Clock Logic
+    else if (type == MIDI_STATUS_CLOCK) {
+      _clock.handleClock();
+    }
+    else if (type == MIDI_STATUS_START) {
+      _clock.handleStart();
+    }
+    else if (type == MIDI_STATUS_CONTINUE) {
+      _clock.handleContinue();
+    }
+    else if (type == MIDI_STATUS_STOP) {
+      _clock.handleStop();
     }
   }
 };

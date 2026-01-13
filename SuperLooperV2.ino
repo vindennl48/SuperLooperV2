@@ -11,6 +11,7 @@
 #include "Footswitch.h"
 #include "Pot.h"
 #include "MidiHandler.h"
+#include "MidiClock.h"
 
 // #define USB_AUDIO
 // #ifndef USB_AUDIO
@@ -67,7 +68,8 @@ void handleFootswitch();
 void handleLed();
 
 MIDI_CREATE_INSTANCE(HardwareSerial, Serial1, MIDI);
-MidiHandler midiHandler(looper, MIDI);
+MidiClock midiClock;
+MidiHandler midiHandler(looper, MIDI, midiClock);
 
 // -------------------------------------------------------------------------
 // Setup
