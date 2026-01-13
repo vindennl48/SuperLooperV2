@@ -74,11 +74,11 @@ private:
   void processCommonMidi(byte type, byte channel, byte data1, byte data2, const char* source) {
     const char* name = getMidiName(type);
     
-    // Log to Serial Monitor
-    LOG("MIDI %s: %s (%d), Ch=%d, D1=%d, D2=%d", source, name, type, channel, data1, data2);
-
     // Application Logic
     if ((type & 0xF0) == MIDI_STATUS_CONTROL_CHANGE) {
+      // Log to Serial Monitor only for CC messages
+      LOG("MIDI %s: %s (%d), Ch=%d, D1=%d, D2=%d", source, name, type, channel, data1, data2);
+
       if (data1 == 10) {
         _looper.trigger();
       } else if (data1 == 11) {

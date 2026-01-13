@@ -23,10 +23,11 @@ using namespace BALibrary;
 // -------------------------------------------------------------------------
 // Hardware Controls
 // -------------------------------------------------------------------------
-// 1 Switch (FS1), 0 Pots, 0 Encoders, 1 Output (LED1)
-BAPhysicalControls controls(2, 0, 0, 1);
+// 1 Switch (FS1), 0 Pots, 0 Encoders, 2 Outputs (LED1, LED2)
+BAPhysicalControls controls(2, 0, 0, 2);
 
 Led led1(controls, BA_EXPAND_LED1_PIN);
+Led led2(controls, BA_EXPAND_LED2_PIN);
 Footswitch fs1(controls, BA_EXPAND_SW1_PIN);
 Footswitch fs2(controls, BA_EXPAND_SW2_PIN);
 Pot pot1(controls, BA_EXPAND_POT1_PIN, true);
@@ -66,6 +67,7 @@ AudioConnection      patchUsb1(outputMixer, 0, usbOut, 1);
 void handlePot();
 void handleFootswitch();
 void handleLed();
+void handleBpmLogging();
 
 MIDI_CREATE_INSTANCE(HardwareSerial, Serial1, MIDI);
 MidiClock midiClock;
@@ -170,6 +172,7 @@ void loop() {
   handleFootswitch();
   handleLed();
   midiHandler.update();
+  handleBpmLogging();
 }
 
 void handlePot() {
@@ -202,21 +205,51 @@ void handleFootswitch() {
 
 void handleLed() {
   led1.update();
+  led2.update();
 
   // Blink if waiting for a state change (Quantized start/stop)
   if (looper.isWaiting()) {
     led1.blink(250);
-    return;
   }
-
   // Solid state feedback
-  if (looper.isIdle()) {
+  else if (looper.isIdle()) {
     led1.off();
   } else if (looper.isRecording() || looper.isPlaying()) {
     led1.on();
   } else {
     // Fallback (e.g. stopped but not idle, though currently reset handles that)
     led1.off();
+  }
+
+  // LED 2 Metronome Logic
+  static uint32_t lastBeatCount = 0;
+  static unsigned long beatLedOnTime = 0;
+  
+  if (midiClock.getTotalBeats() > lastBeatCount) {
+    led2.on();
+    beatLedOnTime = millis();
+    lastBeatCount = midiClock.getTotalBeats();
+  }
+
+  if (led2.isOn() && millis() - beatLedOnTime > 100) {
+    led2.off();
+  }
+}
+
+void handleBpmLogging() {
+  static uint32_t lastBeat = 0;
+  uint32_t currentTotalBeats = midiClock.getTotalBeats();
+  
+  if (currentTotalBeats > lastBeat) {
+    float bpm = midiClock.getBpm();
+    if (bpm > 0) {
+      LOG("Beat %d/%d (Total: %d) | BPM: %.2f", 
+          midiClock.getCurrentBeat(), 
+          midiClock.getBeatsPerMeasure(),
+          currentTotalBeats,
+          bpm);
+    }
+    lastBeat = currentTotalBeats;
   }
 }
 
