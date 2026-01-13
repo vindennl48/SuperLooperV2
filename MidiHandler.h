@@ -83,6 +83,8 @@ private:
         _looper.trigger();
       } else if (data1 == 11) {
         _looper.reset();
+      } else if (data1 == 12) {
+        _clock.triggerMeasureSync();
       }
     }
     // Realtime / Clock Logic

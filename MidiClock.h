@@ -22,8 +22,10 @@ public:
     
     // Check for timeout/reset condition (e.g. if we haven't received a clock in a long time)
     if (_lastTickMicros > 0 && (now - _lastTickMicros > 500000)) { // 500ms timeout
-       // Note: We don't hard reset the sync state here, just the BPM calculation
+       // If the clock was stopped, we want to treat the next tick as a restart
        _sampleCount = 0;
+       _tickCounter = 23; // So next tick wraps to 0
+       _currentBeatOfMeasure = 0; // So next beat becomes 1
     }
     _lastTickMicros = now;
 
@@ -74,19 +76,26 @@ public:
   }
 
   void triggerMeasureSync() {
+    // Determine the "effective" beat index based on how close we are to the next beat
+    // If we are late in the current beat (Tick >= 18), we assume the user is "rushing" the next beat.
+    int effectiveAbsBeat = _absBeatCount;
+    if (_tickCounter >= 18) {
+      effectiveAbsBeat++;
+    }
+
     if (_state == IDLE || _state == LOCKED) {
       _state = LEARNING;
       _tickCounter = 0; // Align phase to the "One"
       _absBeatCount = 1;
       _lastStompedBeat = 1;
-      _totalBeatCount++; // Trigger a beat event immediately
+      _totalBeatCount++; 
       _currentBeatOfMeasure = 1;
       _totalMeasureCount++;
     } 
     else if (_state == LEARNING) {
-      if (_absBeatCount > _lastStompedBeat) {
-        // Valid stomp in a new beat window
-        _lastStompedBeat = _absBeatCount;
+      // Check if this stomp belongs to a new beat window
+      if (effectiveAbsBeat > _lastStompedBeat) {
+        _lastStompedBeat = effectiveAbsBeat;
       }
     }
   }

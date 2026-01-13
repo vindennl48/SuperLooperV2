@@ -199,7 +199,8 @@ void handleFootswitch() {
   }
 
   if (fs2.pressed()) {
-    looper.reset();
+    midiClock.triggerMeasureSync();
+    LOG("Sync Triggered via FS2");
   }
 }
 
@@ -224,14 +225,26 @@ void handleLed() {
   // LED 2 Metronome Logic
   static uint32_t lastBeatCount = 0;
   static unsigned long beatLedOnTime = 0;
+  static unsigned long currentBlinkDuration = 50;
   
   if (midiClock.getTotalBeats() > lastBeatCount) {
     led2.on();
     beatLedOnTime = millis();
     lastBeatCount = midiClock.getTotalBeats();
+
+    // Determine duration for this beat
+    if (midiClock.isLocked()) {
+      if (midiClock.getCurrentBeat() == 1) {
+        currentBlinkDuration = 200; // Downbeat
+      } else {
+        currentBlinkDuration = 50;  // Off-beat
+      }
+    } else {
+      currentBlinkDuration = 50;    // Default / Learning
+    }
   }
 
-  if (led2.isOn() && millis() - beatLedOnTime > 100) {
+  if (led2.isOn() && millis() - beatLedOnTime > currentBlinkDuration) {
     led2.off();
   }
 }

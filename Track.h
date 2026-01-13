@@ -39,7 +39,7 @@ public:
 
         // Debug: Log start of recording
         if (timeline == 0) {
-             LOG("Track::update() -> Recording started at RAM Addr: %d", addrOffset);
+          LOG("Track::update() -> Recording started at RAM Addr: %d", addrOffset);
         }
 
         for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
