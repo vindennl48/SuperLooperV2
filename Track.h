@@ -289,8 +289,8 @@ private:
           gc_record.hardReset(0.0f);
           xfadeBlockCount = 0;
 
-          if (trim && actualBlockLength > timeline) {
-            xfadeBlockCount = actualBlockLength - timeline;
+          if (trim && timeline > actualBlockLength) {
+            xfadeBlockCount = timeline - actualBlockLength;
             timeline = actualBlockLength;
           }
 
